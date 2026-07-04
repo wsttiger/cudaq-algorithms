@@ -27,8 +27,8 @@ from __future__ import annotations
 import cudaq
 from cudaq import spin
 
-from pauli_lcu_py import (PauliLCU, prepare, reflect_about_zero, select,
-                          unprepare, walk)
+from pauli_lcu_py import (PauliLCU, controlled_select, prepare,
+                          reflect_about_zero, select, unprepare, walk)
 
 FORWARD = 0
 ADJOINT = 1
@@ -55,6 +55,62 @@ def adjoint_walk(ancilla: cudaq.qview, system: cudaq.qview,
     """Adjoint walk step: reflection first, then SELECT (both self-adjoint)."""
     reflect_about_prepare(ancilla, angles)
     select(ancilla, system, term_controls, term_ops, term_lengths, term_signs)
+
+
+@cudaq.kernel
+def controlled_reflect_about_zero(control_and_register: cudaq.qview):
+    """Zero-state reflection on qubits 1.. controlled by qubit 0.
+
+    Qubit 0 of ``control_and_register`` is the external control (see
+    controlled_select for why the control shares a register).
+    """
+    total = control_and_register.size()
+    n = total - 1
+    for i in range(n):
+        x(control_and_register[1 + i])
+    if n == 0:
+        z(control_and_register[0])
+    else:
+        z.ctrl(control_and_register.front(total - 1),
+               control_and_register[total - 1])
+    for i in range(n):
+        x(control_and_register[1 + i])
+
+
+@cudaq.kernel
+def controlled_reflect_about_prepare(control_and_ancilla: cudaq.qview,
+                                     angles: list[float]):
+    """PREPARE-state reflection controlled by qubit 0.
+
+    The PREPARE / PREPARE-dagger pair stays uncontrolled (it cancels when
+    the control is |0>); only the zero reflection is controlled.
+    """
+    n = control_and_ancilla.size() - 1
+    unprepare(control_and_ancilla.back(n), angles)
+    controlled_reflect_about_zero(control_and_ancilla)
+    prepare(control_and_ancilla.back(n), angles)
+
+
+@cudaq.kernel
+def controlled_walk(control_and_ancilla: cudaq.qview, system: cudaq.qview,
+                    angles: list[float], term_controls: list[int],
+                    term_ops: list[int], term_lengths: list[int],
+                    term_signs: list[int]):
+    """One walk step controlled by qubit 0 of ``control_and_ancilla``."""
+    controlled_select(control_and_ancilla, system, term_controls, term_ops,
+                      term_lengths, term_signs)
+    controlled_reflect_about_prepare(control_and_ancilla, angles)
+
+
+@cudaq.kernel
+def controlled_adjoint_walk(control_and_ancilla: cudaq.qview,
+                            system: cudaq.qview, angles: list[float],
+                            term_controls: list[int], term_ops: list[int],
+                            term_lengths: list[int], term_signs: list[int]):
+    """One adjoint walk step controlled by qubit 0."""
+    controlled_reflect_about_prepare(control_and_ancilla, angles)
+    controlled_select(control_and_ancilla, system, term_controls, term_ops,
+                      term_lengths, term_signs)
 
 
 # ============================================================================
@@ -216,6 +272,75 @@ class Walk:
             unprepare(ancilla, angles)
 
         return roundtrip
+
+    def controlled_kernel(self, power: int = 1, control_state: int = 1,
+                          uncompute: bool = True):
+        """``@cudaq.kernel(state)`` running controlled walks.
+
+        Allocates the system register from ``state``, then one register
+        holding [control, ancillas] (the control cannot share a control set
+        with a separate register in CUDA-Q Python). The control qubit is
+        initialized to ``control_state``; with control |0> the circuit is
+        the identity up to the (cancelling) PREPARE pair.
+        """
+        angles, controls, ops, lengths, signs = self.encoding.kernel_args
+        n_anc = self.encoding.num_ancilla
+        steps = int(power)
+        flip_control = int(control_state) == 1
+
+        if uncompute:
+
+            @cudaq.kernel
+            def controlled_walked(state: cudaq.State):
+                system = cudaq.qvector(state)
+                control_and_ancilla = cudaq.qvector(1 + n_anc)
+                if flip_control:
+                    x(control_and_ancilla[0])
+                prepare(control_and_ancilla.back(n_anc), angles)
+                for _ in range(steps):
+                    controlled_walk(control_and_ancilla, system, angles,
+                                    controls, ops, lengths, signs)
+                unprepare(control_and_ancilla.back(n_anc), angles)
+
+            return controlled_walked
+
+        @cudaq.kernel
+        def controlled_walked_prepared(state: cudaq.State):
+            system = cudaq.qvector(state)
+            control_and_ancilla = cudaq.qvector(1 + n_anc)
+            if flip_control:
+                x(control_and_ancilla[0])
+            prepare(control_and_ancilla.back(n_anc), angles)
+            for _ in range(steps):
+                controlled_walk(control_and_ancilla, system, angles, controls,
+                                ops, lengths, signs)
+
+        return controlled_walked_prepared
+
+    def controlled_roundtrip_kernel(self, power: int = 1,
+                                    control_state: int = 1):
+        """Controlled W^power then controlled (W dagger)^power — identity."""
+        angles, controls, ops, lengths, signs = self.encoding.kernel_args
+        n_anc = self.encoding.num_ancilla
+        steps = int(power)
+        flip_control = int(control_state) == 1
+
+        @cudaq.kernel
+        def controlled_roundtrip(state: cudaq.State):
+            system = cudaq.qvector(state)
+            control_and_ancilla = cudaq.qvector(1 + n_anc)
+            if flip_control:
+                x(control_and_ancilla[0])
+            prepare(control_and_ancilla.back(n_anc), angles)
+            for _ in range(steps):
+                controlled_walk(control_and_ancilla, system, angles, controls,
+                                ops, lengths, signs)
+            for _ in range(steps):
+                controlled_adjoint_walk(control_and_ancilla, system, angles,
+                                        controls, ops, lengths, signs)
+            unprepare(control_and_ancilla.back(n_anc), angles)
+
+        return controlled_roundtrip
 
     # ------------------------------------------------------------------
     # Moment measurement (simulation-friendly, but observable-based:

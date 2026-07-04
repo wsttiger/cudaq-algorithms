@@ -123,3 +123,68 @@ def test_walk_rejects_degenerate_encoding():
         qub.reflection_observable(single)
     with pytest.raises(ValueError):
         qub.select_observable(single)
+
+
+def _controlled_layout_maps(num_system, num_ancilla):
+    """Index maps between the controlled and uncontrolled kernel layouts.
+
+    Uncontrolled: [system][ancilla]; controlled: [system][control][ancilla].
+    q[0] is the least-significant statevector bit.
+    """
+    def uncontrolled(sys, anc):
+        return sys + (anc << num_system)
+
+    def controlled(sys, ctrl, anc):
+        return sys + (ctrl << num_system) + (anc << (num_system + 1))
+
+    return uncontrolled, controlled
+
+
+def test_controlled_walk_respects_control():
+    enc = lcu.PauliLCU(FOUR_TERMS_2Q)
+    walk = qub.Walk(enc)
+    ket = random_ket(2, seed=13)
+    unc_index, con_index = _controlled_layout_maps(enc.num_system,
+                                                   enc.num_ancilla)
+
+    reference = np.asarray(
+        cudaq.get_state(walk.kernel(power=2), lcu.state_from(ket)))
+    on_state = np.asarray(
+        cudaq.get_state(walk.controlled_kernel(power=2, control_state=1),
+                        lcu.state_from(ket)))
+    off_state = np.asarray(
+        cudaq.get_state(walk.controlled_kernel(power=2, control_state=0),
+                        lcu.state_from(ket)))
+
+    for anc in range(1 << enc.num_ancilla):
+        for sys in range(1 << enc.num_system):
+            # Control |1>: the control=1 half reproduces the uncontrolled
+            # state; the control=0 half is empty.
+            assert on_state[con_index(sys, 1, anc)] == pytest.approx(
+                reference[unc_index(sys, anc)], abs=1e-10)
+            assert abs(on_state[con_index(sys, 0, anc)]) < 1e-10
+            # Control |0>: identity — input state, ancillas in |0>.
+            expected = ket[sys] if anc == 0 else 0.0
+            assert off_state[con_index(sys, 0, anc)] == pytest.approx(
+                expected, abs=1e-10)
+            assert abs(off_state[con_index(sys, 1, anc)]) < 1e-10
+
+
+def test_controlled_adjoint_walk_inverts_controlled_walk():
+    enc = lcu.PauliLCU(FOUR_TERMS_2Q)
+    walk = qub.Walk(enc)
+    ket = random_ket(2, seed=17)
+    _, con_index = _controlled_layout_maps(enc.num_system, enc.num_ancilla)
+
+    for control_state in (0, 1):
+        state = np.asarray(
+            cudaq.get_state(
+                walk.controlled_roundtrip_kernel(power=2,
+                                                 control_state=control_state),
+                lcu.state_from(ket)))
+        for anc in range(1 << enc.num_ancilla):
+            for sys in range(1 << enc.num_system):
+                expected = ket[sys] if anc == 0 else 0.0
+                assert state[con_index(sys, control_state,
+                                       anc)] == pytest.approx(expected,
+                                                              abs=1e-10)

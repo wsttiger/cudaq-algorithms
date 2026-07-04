@@ -191,3 +191,35 @@ def test_hamiltonian_simulation_with_qsppack_phases():
     exact = eigenvectors @ (np.exp(-1.0j * time * eigenvalues) *
                             (eigenvectors.conj().T @ ket))
     assert np.linalg.norm(evolved - exact) < 1e-8
+
+
+def test_controlled_sequence_respects_control():
+    enc = lcu.PauliLCU(FOUR_TERMS_2Q)
+    transformer = qsvt.QSVT(enc)
+    seq = qsvt.PhaseSequence([0.3, -0.4, 0.25],
+                             walk_directions=["forward", "adjoint"])
+    ket = random_ket(2, seed=23)
+    ns, na = enc.num_system, enc.num_ancilla
+
+    def con_index(sys, ctrl, anc):
+        return sys + (ctrl << ns) + (anc << (ns + 1))
+
+    reference = np.asarray(
+        cudaq.get_state(transformer.kernel(seq), lcu.state_from(ket)))
+    on_state = np.asarray(
+        cudaq.get_state(transformer.controlled_kernel(seq, control_state=1),
+                        lcu.state_from(ket)))
+    off_state = np.asarray(
+        cudaq.get_state(transformer.controlled_kernel(seq, control_state=0),
+                        lcu.state_from(ket)))
+
+    for anc in range(1 << na):
+        for sys in range(1 << ns):
+            unc = reference[sys + (anc << ns)]
+            assert on_state[con_index(sys, 1, anc)] == pytest.approx(
+                unc, abs=1e-10)
+            assert abs(on_state[con_index(sys, 0, anc)]) < 1e-10
+            expected = ket[sys] if anc == 0 else 0.0
+            assert off_state[con_index(sys, 0, anc)] == pytest.approx(
+                expected, abs=1e-10)
+            assert abs(off_state[con_index(sys, 1, anc)]) < 1e-10

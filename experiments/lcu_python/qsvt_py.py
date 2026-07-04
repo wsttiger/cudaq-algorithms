@@ -31,8 +31,10 @@ import math
 
 import cudaq
 
-from pauli_lcu_py import PauliLCU, reflect_about_zero
+from pauli_lcu_py import (PauliLCU, controlled_select, prepare,
+                          reflect_about_zero, unprepare)
 from pauli_lcu_py import apply as lcu_apply
+from qubitization_py import controlled_reflect_about_zero
 
 FORWARD = 0
 ADJOINT = 1
@@ -174,6 +176,56 @@ def apply_phase_sequence(signal: cudaq.qview, system: cudaq.qview,
         signal_phase(signal, phases[i])
 
 
+@cudaq.kernel
+def controlled_signal_phase(control_and_register: cudaq.qview, phase: float):
+    """Signal phase on qubits 1.. controlled by qubit 0."""
+    total = control_and_register.size()
+    n = total - 1
+    for i in range(n):
+        x(control_and_register[1 + i])
+    if n == 0:
+        r1(phase, control_and_register[0])
+    else:
+        r1.ctrl(phase, control_and_register.front(total - 1),
+                control_and_register[total - 1])
+    for i in range(n):
+        x(control_and_register[1 + i])
+
+
+@cudaq.kernel
+def apply_controlled_phase_sequence(control_and_signal: cudaq.qview,
+                                    system: cudaq.qview, phases: list[float],
+                                    walk_directions: list[int],
+                                    angles: list[float],
+                                    term_controls: list[int],
+                                    term_ops: list[int],
+                                    term_lengths: list[int],
+                                    term_signs: list[int]):
+    """QSVT sequence controlled by qubit 0 of ``control_and_signal``.
+
+    The uncontrolled PREPARE / PREPARE-dagger pair wraps a controlled
+    SELECT, so each walk step collapses to the identity for control |0>;
+    the zero reflection and signal phases are likewise controlled, making
+    the full sequence the identity when the control is off.
+    """
+    n_signal = control_and_signal.size() - 1
+    controlled_signal_phase(control_and_signal, phases[0])
+    for i in range(1, len(phases)):
+        if walk_directions[i - 1] == 1:
+            controlled_reflect_about_zero(control_and_signal)
+            prepare(control_and_signal.back(n_signal), angles)
+            controlled_select(control_and_signal, system, term_controls,
+                              term_ops, term_lengths, term_signs)
+            unprepare(control_and_signal.back(n_signal), angles)
+        else:
+            prepare(control_and_signal.back(n_signal), angles)
+            controlled_select(control_and_signal, system, term_controls,
+                              term_ops, term_lengths, term_signs)
+            unprepare(control_and_signal.back(n_signal), angles)
+            controlled_reflect_about_zero(control_and_signal)
+        controlled_signal_phase(control_and_signal, phases[i])
+
+
 # ============================================================================
 # The user-facing object
 # ============================================================================
@@ -215,6 +267,34 @@ class QSVT:
                                  controls, ops, lengths, signs)
 
         return qsvt_kernel
+
+    def controlled_kernel(self, sequence, convention=None,
+                          control_state: int = 1):
+        """``@cudaq.kernel(state)`` applying the sequence controlled.
+
+        Allocates the system register from ``state``, then one register
+        holding [control, signal] (a CUDA-Q Python control set cannot mix a
+        bare qubit with a separate register). With control |0> the sequence
+        is the identity.
+        """
+        seq = _as_sequence(sequence, convention)
+        phases = seq.projector_phases
+        directions = list(seq.walk_directions) or [FORWARD]
+        angles, controls, ops, lengths, signs = self.encoding.kernel_args
+        n_anc = self.encoding.num_ancilla
+        flip_control = int(control_state) == 1
+
+        @cudaq.kernel
+        def controlled_qsvt_kernel(state: cudaq.State):
+            system = cudaq.qvector(state)
+            control_and_signal = cudaq.qvector(1 + n_anc)
+            if flip_control:
+                x(control_and_signal[0])
+            apply_controlled_phase_sequence(control_and_signal, system,
+                                            phases, directions, angles,
+                                            controls, ops, lengths, signs)
+
+        return controlled_qsvt_kernel
 
     def transform(self, ket, sequence, convention=None):
         """Return the good-subspace state after the sequence (simulation).

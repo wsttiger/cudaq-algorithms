@@ -28,10 +28,10 @@ PYTHONPATH=/path/to/cudaq python3 example_quantum_lanczos.py
 
 The simulation target defaults to `qpp-cpu` and is overridable everywhere via
 `LCU_PY_TARGET`, e.g. `LCU_PY_TARGET=nvidia-fp64` for the GPU statevector
-simulator (verified: 20/20 tests and both examples pass on an RTX 6000 Ada).
+simulator (verified: all tests and both examples pass on an RTX 6000 Ada).
 Use an fp64 target for the test suite — the default `nvidia` target is fp32
-and legitimately misses the 1e-8..1e-10 tolerances (16/20 pass there; the
-four failures are precision, not correctness). State construction goes
+and legitimately misses the 1e-8..1e-10 tolerances (the few failures there
+are precision, not correctness). State construction goes
 through `pauli_lcu_py.state_from`, which matches the input dtype to the
 active target's precision (`cudaq.complex()`), since fp32 simulators reject
 complex128 initial-state data.
@@ -137,6 +137,9 @@ kernels with `enc.kernel_args` supplying the flattened arrays.
      `list[int]` field containing a negative value fails with
      `std::bad_cast` — the blocker for passing one aggregated kernel-args
      object instead of flat lists.
+   - A control set cannot mix a bare qubit with a `qview`, and
+     `cudaq.control` of a composite (kernel-calling) kernel fails — hence
+     the combined-register convention for the controlled family.
 
 6. **Correctness carried over.** Tests mirror the library methodology: dense
    Pauli-sum action match, the single-term negative-coefficient sign
@@ -146,10 +149,25 @@ kernels with `enc.kernel_args` supplying the flattened arrays.
    (including mixed walk directions), qsp/qsvt convention equivalence, and a
    QSPPACK Hamiltonian-simulation run reaching ~1e-15 state error.
 
+### Controlled variants
+
+The full controlled family is implemented: `controlled_select`,
+`controlled_reflect_about_zero/prepare`, `controlled_walk`/
+`controlled_adjoint_walk`, `Walk.controlled_kernel` /
+`controlled_roundtrip_kernel`, and `QSVT.controlled_kernel` via
+`apply_controlled_phase_sequence`. One language constraint shaped the API:
+a CUDA-Q Python control set cannot mix a bare qubit with a `qview`
+("invalid argument type for control operand"), and `cudaq.control(...)` of a
+kernel that calls other kernels fails ("Could not successfully apply kernel
+specialization"). The controlled kernels therefore take a single
+**combined register** whose qubit 0 is the external control and whose
+remaining qubits are the ancilla/signal register — every control set is then
+a view of that register. Uncontrolled PREPARE pairs wrap the controlled
+SELECT, so everything collapses to the identity at control |0> (verified in
+tests for walks, roundtrips, and sequences, both control states).
+
 ## Deliberate scope cuts
 
-- No controlled variants (`controlled_select`, controlled walks/sequences) —
-  nothing here prevents them; the variadic-`ctrl` pattern extends directly.
 - `action()`/`transform()`/`good_subspace()` are simulation conveniences and
   say so; the kernel factories and observables are the hardware-shaped path.
 - Phase *generation* stays external (QSPPACK), matching the library's scope

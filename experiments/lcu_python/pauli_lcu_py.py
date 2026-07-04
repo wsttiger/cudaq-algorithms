@@ -146,6 +146,50 @@ def select(ancilla: cudaq.qview, system: cudaq.qview, term_controls: list[int],
 
 
 @cudaq.kernel
+def controlled_select(control_and_ancilla: cudaq.qview, system: cudaq.qview,
+                      term_controls: list[int], term_ops: list[int],
+                      term_lengths: list[int], term_signs: list[int]):
+    """SELECT controlled by an external qubit.
+
+    CUDA-Q Python kernels cannot mix a bare qubit with a qview in one
+    control set, so the external control is qubit 0 of
+    ``control_and_ancilla`` and the LCU ancillas are the remaining qubits;
+    every control set is then a view of that one register.
+    """
+    n_anc = control_and_ancilla.size() - 1
+    ptr_ctrl = 0
+    ptr_op = 0
+    for i in range(len(term_lengths)):
+        for b in range(n_anc):
+            if term_controls[ptr_ctrl] == 0:
+                x(control_and_ancilla[1 + b])
+            ptr_ctrl += 1
+        for _ in range(term_lengths[i]):
+            code = term_ops[ptr_op]
+            target = term_ops[ptr_op + 1]
+            ptr_op += 2
+            if code == 1:
+                x.ctrl(control_and_ancilla, system[target])
+            elif code == 2:
+                y.ctrl(control_and_ancilla, system[target])
+            else:
+                z.ctrl(control_and_ancilla, system[target])
+        if term_signs[i] < 0:
+            if n_anc == 0:
+                # Controlled -I on the system is a Z on the control.
+                z(control_and_ancilla[0])
+            else:
+                total = control_and_ancilla.size()
+                z.ctrl(control_and_ancilla.front(total - 1),
+                       control_and_ancilla[total - 1])
+        back = ptr_ctrl - 1
+        for b in range(n_anc):
+            if term_controls[back] == 0:
+                x(control_and_ancilla[n_anc - b])
+            back -= 1
+
+
+@cudaq.kernel
 def apply(ancilla: cudaq.qview, system: cudaq.qview, angles: list[float],
           term_controls: list[int], term_ops: list[int],
           term_lengths: list[int], term_signs: list[int]):

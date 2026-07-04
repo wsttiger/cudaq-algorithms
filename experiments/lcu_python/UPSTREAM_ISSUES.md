@@ -141,8 +141,72 @@ that a captured empty list is the cause.
 
 ---
 
+## Issue 3 (limitation report / feature request) — controlled composite kernels
+
+**Title:** Python kernel: no way to control an operation on a mixed
+qubit + qview control set; `cudaq.control` fails on kernels that call
+other kernels
+
+### Description
+
+Two related gaps make "one external control qubit + an ancilla register"
+control sets — the standard shape for controlled SELECT / controlled
+qubitization walks — awkward in Python kernels:
+
+1. Gate-level: `x.ctrl(control_qubit, ancilla_view, target)` (any mix of a
+   bare qubit and a `qview` in one control set) is rejected with
+   `invalid argument type for control operand`. All-qubit and single-view
+   control sets work.
+2. Kernel-level: `cudaq.control(kernel, control, args...)` works for leaf
+   kernels (including list arguments), but fails with
+   `Could not successfully apply kernel specialization` when the controlled
+   kernel itself calls another kernel — so composite operations (a walk
+   step built from SELECT + reflections) cannot be controlled wholesale.
+
+### Minimal reproducers
+
+```python
+import cudaq
+cudaq.set_target("qpp-cpu")
+
+# (1) mixed control set
+@cudaq.kernel
+def mixed():
+    c = cudaq.qubit()
+    q = cudaq.qvector(3)
+    x.ctrl(c, q.front(2), q[2])   # error: invalid argument type for control operand
+
+# (2) cudaq.control of a composite kernel
+@cudaq.kernel
+def leaf(q: cudaq.qview):
+    for i in range(q.size()):
+        x(q[i])
+
+@cudaq.kernel
+def composite(q: cudaq.qview):
+    leaf(q)
+
+@cudaq.kernel
+def caller():
+    c = cudaq.qubit()
+    q = cudaq.qvector(2)
+    x(c)
+    cudaq.control(leaf, c, q)       # OK
+    cudaq.control(composite, c, q)  # RuntimeError: Could not successfully
+                                    # apply kernel specialization.
+```
+
+### Workaround / impact
+
+Libraries can restructure so the control qubit shares one register with the
+ancillas and slice views (`register.front(...)`/`register.back(...)`), but
+that leaks into the public API: users must co-allocate their control qubit
+with the library's ancilla register instead of passing any qubit they own.
+Either fixing (1) or (2) would remove the constraint; (2) alone would allow
+`cudaq.control(walk_step, ctrl, ...)` over composite operations.
+
 ## Suggested labels
 
-Both: `python`, `bug`, `kernel-builder`. Issue 1 is the higher-impact one
+All: `python`, `kernel-builder`; issues 1-2 `bug`, issue 3 arguably enhancement. Issue 1 is the higher-impact one
 (it blocks aggregated kernel-argument types outright); Issue 2 has an easy
 workaround once diagnosed, so the diagnostic improvement alone would help.
