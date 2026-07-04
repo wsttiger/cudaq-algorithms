@@ -1,10 +1,12 @@
 # Draft upstream issues for NVIDIA/cuda-quantum
 
 Found while prototyping a pure-Python Pauli LCU library layer
-(`experiments/lcu_python/` on the `expt_lcu_python` branch). Both are
-Python kernel argument/capture marshaling defects. Not yet filed.
+(`experiments/lcu_python/` on the `expt_lcu_python` branch and
+`experiments/suzuki_trotter_python/` on `add_suzuki_trotter_python`).
+Issues 1-2 are marshaling defects, 3 is a control-composition gap, 4 is a
+silent control-flow miscompile. Not yet filed.
 
-Environment for both:
+Environment for all:
 - CUDA-Q built from source, commit `0be565550f4c23affdcbed9e4eaec38d2d0915e6`
 - Python 3.11, target `qpp-cpu`, Linux x86_64 (AlmaLinux 8.10)
 
@@ -205,8 +207,68 @@ with the library's ancilla register instead of passing any qubit they own.
 Either fixing (1) or (2) would remove the constraint; (2) alone would allow
 `cudaq.control(walk_step, ctrl, ...)` over composite operations.
 
+## Issue 4 — `return` inside a Python kernel is silently ignored
+
+**Title:** Python kernel: early `return` statements are silently ignored —
+gates after a guard execute unconditionally
+
+### Description
+
+An `if condition: return` guard inside a `@cudaq.kernel` compiles without
+warning but has no effect: the operations after it execute regardless of the
+condition (and regardless of whether the condition is a kernel argument or a
+constant). This is the most severe issue of this set because it produces
+**silently wrong circuits** rather than an error.
+
+It is also easy to miss in testing: guards whose "guarded" code consists of
+loops over empty/zero-trip ranges appear to work (the loops do nothing for
+exactly the inputs the guard was for), so a kernel can carry dead guards
+through an entire test suite until one guarded path contains unconditional
+gates. That is exactly how we found it — a C++-mirroring device kernel with
+`if steps == 0: return` (masked by `for _ in range(steps)`) and
+`if order not in (1, 2, 4): return` (NOT masked: an unsupported order
+executed a wrong product formula instead of the documented no-op).
+
+### Minimal reproducer
+
+```python
+import cudaq
+cudaq.set_target("qpp-cpu")
+
+@cudaq.kernel
+def guarded(skip: int):
+    q = cudaq.qvector(1)
+    if skip == 1:
+        return
+    x(q[0])
+
+print(cudaq.sample(guarded, 0))  # { 1:1000 }  (expected)
+print(cudaq.sample(guarded, 1))  # { 1:1000 }  (expected { 0:1000 })
+```
+
+Also reproduces with multi-clause conditions
+(`if a != 1 and a != 2: return`) and with multiple sequential guards.
+
+### Expected / suggested
+
+Either honor `return` control flow in void kernels, or — if early return is
+intentionally unsupported — make the AST bridge reject it with a compile
+error. Silent acceptance is the worst of both: the C++ device-kernel idiom
+"invalid runtime inputs are no-ops via early return" ports over as a
+silently wrong circuit.
+
+### Workaround
+
+Restructure kernel bodies as a single positively-guarded if-block:
+
+```python
+    valid = steps > 0 and order in_supported
+    if valid:
+        <entire body>
+```
+
 ## Suggested labels
 
-All: `python`, `kernel-builder`; issues 1-2 `bug`, issue 3 arguably enhancement. Issue 1 is the higher-impact one
+All: `python`, `kernel-builder`; issues 1, 2, and 4 `bug` (4 is the most severe — silent wrong circuits), issue 3 arguably enhancement. Issue 1 is the higher-impact one
 (it blocks aggregated kernel-argument types outright); Issue 2 has an easy
 workaround once diagnosed, so the diagnostic improvement alone would help.
