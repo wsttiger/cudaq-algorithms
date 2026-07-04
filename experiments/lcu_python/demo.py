@@ -11,6 +11,7 @@
 Run with:  PYTHONPATH=/path/to/cudaq python3 demo.py
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -29,7 +30,7 @@ def banner(title):
 
 
 def main():
-    cudaq.set_target("qpp-cpu")
+    cudaq.set_target(os.environ.get("LCU_PY_TARGET", "qpp-cpu"))
 
     banner("1. Construct from a plain dict (word -> coefficient)")
     enc = lcu.PauliLCU({"ZI": 0.70, "IZ": -0.43, "XX": 0.19, "YZ": 0.11})
@@ -53,7 +54,7 @@ def main():
 
     banner("4. Kernel factories for sampling/observing workflows")
     kernel = enc.encode_kernel()
-    state = cudaq.get_state(kernel, cudaq.State.from_data(psi))
+    state = cudaq.get_state(kernel, lcu.state_from(psi))
     print(f"full statevector dimension  = {len(np.asarray(state))}")
     print(f"good-subspace dimension     = {len(enc.good_subspace(state))}")
 
@@ -62,7 +63,7 @@ def main():
     ket = np.array([np.cos(0.35), np.sin(0.35)], dtype=np.complex128)
     for k in (1, 2, 3):
         walked = cudaq.get_state(moment_enc.walk_kernel(power=k),
-                                 cudaq.State.from_data(ket))
+                                 lcu.state_from(ket))
         p0 = float(np.sum(np.abs(moment_enc.good_subspace(walked))**2))
         print(f"<T_{2*k}(H/alpha)> from the circuit = {2 * p0 - 1:+.10f}")
 
@@ -79,7 +80,7 @@ def main():
         lcu.unprepare(ancilla, angles)
 
     manual = enc.good_subspace(cudaq.get_state(custom,
-                                               cudaq.State.from_data(psi)))
+                                               lcu.state_from(psi)))
     print(f"manual composition matches action(): "
           f"{np.allclose(manual, good, atol=1e-12)}")
 

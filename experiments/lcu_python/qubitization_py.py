@@ -224,7 +224,7 @@ class Walk:
 
     def moment(self, ket, order: int) -> float:
         """Measure the Chebyshev moment <T_order(H/alpha)> for |ket>."""
-        import numpy as np
+        from pauli_lcu_py import state_from
 
         order = int(order)
         if order < 0:
@@ -236,7 +236,7 @@ class Walk:
         else:
             kernel = self.kernel(power=power, uncompute=False)
             observable = select_observable(self.encoding)
-        state = cudaq.State.from_data(np.asarray(ket, dtype=np.complex128))
+        state = state_from(ket)
         return float(cudaq.observe(kernel, observable, state).expectation())
 
     def moments(self, ket, count: int) -> list[float]:

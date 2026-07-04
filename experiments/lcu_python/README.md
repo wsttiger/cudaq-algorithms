@@ -26,6 +26,16 @@ PYTHONPATH=/path/to/cudaq python3 example_hamiltonian_simulation.py
 PYTHONPATH=/path/to/cudaq python3 example_quantum_lanczos.py
 ```
 
+The simulation target defaults to `qpp-cpu` and is overridable everywhere via
+`LCU_PY_TARGET`, e.g. `LCU_PY_TARGET=nvidia-fp64` for the GPU statevector
+simulator (verified: 20/20 tests and both examples pass on an RTX 6000 Ada).
+Use an fp64 target for the test suite — the default `nvidia` target is fp32
+and legitimately misses the 1e-8..1e-10 tolerances (16/20 pass there; the
+four failures are precision, not correctness). State construction goes
+through `pauli_lcu_py.state_from`, which matches the input dtype to the
+active target's precision (`cudaq.complex()`), since fp32 simulators reject
+complex128 initial-state data.
+
 ## The API surface
 
 ### Block encoding (`pauli_lcu_py`)

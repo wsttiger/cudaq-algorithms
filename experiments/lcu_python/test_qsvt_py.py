@@ -8,6 +8,7 @@
 """Tests for the pure-Python QSVT prototype (dense and host-model references)."""
 
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -23,9 +24,13 @@ import qsvt_py as qsvt
 from test_pauli_lcu_py import dense_matrix, random_ket
 
 
+# Override with e.g. LCU_PY_TARGET=nvidia-fp64 to run on a GPU simulator.
+SIMULATION_TARGET = os.environ.get("LCU_PY_TARGET", "qpp-cpu")
+
+
 @pytest.fixture(autouse=True)
-def qpp_cpu_target():
-    cudaq.set_target("qpp-cpu")
+def simulation_target():
+    cudaq.set_target(SIMULATION_TARGET)
     yield
     cudaq.reset_target()
 

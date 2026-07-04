@@ -17,6 +17,7 @@ Requires qsppack and scipy.  Run with:
     PYTHONPATH=/path/to/cudaq python3 example_hamiltonian_simulation.py
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -94,7 +95,7 @@ def dense_matrix(terms, num_qubits):
 
 
 def main():
-    cudaq.set_target("qpp-cpu")
+    cudaq.set_target(os.environ.get("LCU_PY_TARGET", "qpp-cpu"))
 
     # -- the entire quantum workflow -------------------------------------
     encoding = lcu.PauliLCU(HAMILTONIAN)

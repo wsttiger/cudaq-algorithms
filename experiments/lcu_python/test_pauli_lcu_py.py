@@ -8,6 +8,7 @@
 """Correctness tests for the pure-Python PauliLCU prototype (dense references)."""
 
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -22,9 +23,13 @@ from cudaq import spin
 import pauli_lcu_py as lcu
 
 
+# Override with e.g. LCU_PY_TARGET=nvidia-fp64 to run on a GPU simulator.
+SIMULATION_TARGET = os.environ.get("LCU_PY_TARGET", "qpp-cpu")
+
+
 @pytest.fixture(autouse=True)
-def qpp_cpu_target():
-    cudaq.set_target("qpp-cpu")
+def simulation_target():
+    cudaq.set_target(SIMULATION_TARGET)
     yield
     cudaq.reset_target()
 
@@ -122,7 +127,7 @@ def test_walk_moments_match_chebyshev():
                    dtype=np.complex128)
     for k in (1, 2, 3):
         state = cudaq.get_state(enc.walk_kernel(power=k),
-                                cudaq.State.from_data(ket))
+                                lcu.state_from(ket))
         zero_probability = float(
             np.sum(np.abs(enc.good_subspace(state))**2))
         moment = 2.0 * zero_probability - 1.0

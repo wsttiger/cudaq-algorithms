@@ -182,6 +182,18 @@ def walk(ancilla: cudaq.qview, system: cudaq.qview, angles: list[float],
     prepare(ancilla, angles)
 
 
+def state_from(ket):
+    """Build a cudaq.State from array data at the current target's precision.
+
+    fp32 simulators (e.g. the default `nvidia` target) reject complex128
+    input ("[sim-state] invalid data precision"); cudaq.complex() reports
+    the dtype the active target expects.
+    """
+    import numpy as np
+
+    return cudaq.State.from_data(np.asarray(ket, dtype=cudaq.complex()))
+
+
 # ============================================================================
 # Host-side decomposition
 # ============================================================================
@@ -478,9 +490,5 @@ class PauliLCU:
         Simulation-only convenience (uses ``cudaq.get_state``). Multiply by
         ``alpha`` to recover H|ket>.
         """
-        import numpy as np
-
-        ket = np.asarray(ket, dtype=np.complex128)
-        state = cudaq.get_state(self.encode_kernel(),
-                                cudaq.State.from_data(ket))
+        state = cudaq.get_state(self.encode_kernel(), state_from(ket))
         return self.good_subspace(state)

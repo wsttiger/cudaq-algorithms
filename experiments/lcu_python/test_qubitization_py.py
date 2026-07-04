@@ -7,6 +7,7 @@
 # ============================================================================ #
 """Tests for the pure-Python qubitization prototype (dense references)."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -22,9 +23,13 @@ import qubitization_py as qub
 from test_pauli_lcu_py import dense_matrix, random_ket
 
 
+# Override with e.g. LCU_PY_TARGET=nvidia-fp64 to run on a GPU simulator.
+SIMULATION_TARGET = os.environ.get("LCU_PY_TARGET", "qpp-cpu")
+
+
 @pytest.fixture(autouse=True)
-def qpp_cpu_target():
-    cudaq.set_target("qpp-cpu")
+def simulation_target():
+    cudaq.set_target(SIMULATION_TARGET)
     yield
     cudaq.reset_target()
 
@@ -82,7 +87,7 @@ def test_adjoint_walk_inverts_walk():
 
     for power in (1, 2, 3):
         state = cudaq.get_state(walk.roundtrip_kernel(power=power),
-                                cudaq.State.from_data(ket))
+                                lcu.state_from(ket))
         assert np.allclose(np.asarray(state), reference, atol=1e-10), \
             f"roundtrip failed at power {power}"
 
@@ -94,9 +99,9 @@ def test_walk_kernel_options():
 
     # uncompute=True must agree with the PauliLCU walk_kernel factory.
     a = np.asarray(cudaq.get_state(walk.kernel(power=2),
-                                   cudaq.State.from_data(ket)))
+                                   lcu.state_from(ket)))
     b = np.asarray(cudaq.get_state(enc.walk_kernel(power=2),
-                                   cudaq.State.from_data(ket)))
+                                   lcu.state_from(ket)))
     assert np.allclose(a, b, atol=1e-12)
 
 

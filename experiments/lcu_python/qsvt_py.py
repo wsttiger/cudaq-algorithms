@@ -222,11 +222,10 @@ class QSVT:
         For an eigenstate of H with eigenvalue lambda this equals
         ``evaluate_response(sequence, lambda / alpha)`` times the input.
         """
-        import numpy as np
+        from pauli_lcu_py import state_from
 
-        ket = np.asarray(ket, dtype=np.complex128)
         state = cudaq.get_state(self.kernel(sequence, convention),
-                                cudaq.State.from_data(ket))
+                                state_from(ket))
         return self.encoding.good_subspace(state)
 
 
