@@ -1,10 +1,17 @@
 # Draft upstream issues for NVIDIA/cuda-quantum
 
 Found while prototyping a pure-Python Pauli LCU library layer
-(`experiments/lcu_python/` on the `expt_lcu_python` branch and
-`experiments/suzuki_trotter_python/` on `add_suzuki_trotter_python`).
-Issues 1-2 are marshaling defects, 3 is a control-composition gap, 4 is a
-silent control-flow miscompile. Not yet filed.
+(the `experiments/*_python` prototypes on the `expt_lcu_python`,
+`add_suzuki_trotter_python`, `add_givens_rotation_state_prep_python`, and
+`add_hf_fixed_param_ucc_state_prep_python` branches).
+
+Issues 1, 2, 5, and 6 are argument/capture marshaling defects (2, 5, and 6
+share a pattern: types that marshal correctly as ANNOTATED KERNEL ARGUMENTS
+fail when CAPTURED from the enclosing scope, which breaks the kernel-factory
+idiom). Issue 3 is a control-composition gap, issue 4 is a silent
+control-flow miscompile (the most severe), issue 7 is an operand-form gap,
+and issue 8 is an API-usability inconsistency. Every reproducer was executed
+and verified against the build below. None filed yet.
 
 Environment for all:
 - CUDA-Q built from source, commit `0be565550f4c23affdcbed9e4eaec38d2d0915e6`
@@ -267,8 +274,205 @@ Restructure kernel bodies as a single positively-guarded if-block:
         <entire body>
 ```
 
+## Issue 5 — Captured list of plain strings (Pauli words) fails to lower
+
+**Title:** Python kernel: a captured `list[str]` fails with "Cannot handle
+conversion of python type <class 'str'> to MLIR type" — the same list works
+as an annotated `list[cudaq.pauli_word]` argument
+
+### Description
+
+Plain strings are accepted (and auto-converted to Pauli words) when a list
+of them is passed as a kernel argument annotated `list[cudaq.pauli_word]`,
+but the same list captured from the enclosing scope fails to lower. The
+workaround is converting to `cudaq.pauli_word` objects before capture,
+which works — but the asymmetry between the argument and capture paths is
+surprising, and the error does not name the offending captured variable.
+
+### Minimal reproducer
+
+```python
+import cudaq
+cudaq.set_target("qpp-cpu")
+
+# As an argument: plain strings are fine.
+@cudaq.kernel
+def arg_form(words: list[cudaq.pauli_word]):
+    q = cudaq.qvector(2)
+    for i in range(len(words)):
+        exp_pauli(0.1, q, words[i])
+
+cudaq.sample(arg_form, ["XI", "ZZ"])      # OK
+
+# As a capture: plain strings fail.
+words = ["XI", "ZZ"]
+
+@cudaq.kernel
+def capture_form():
+    q = cudaq.qvector(2)
+    for i in range(len(words)):
+        exp_pauli(0.1, q, words[i])
+
+cudaq.sample(capture_form)
+# error: Cannot handle conversion of python type <class 'str'> to MLIR type.
+
+# Workaround: capture cudaq.pauli_word objects instead — works.
+```
+
+### Expected / suggested
+
+Apply the same string -> pauli_word conversion on the capture path, or name
+the captured variable in the diagnostic.
+
+## Issue 6 — Nested lists work as kernel arguments but cannot be captured
+
+**Title:** Python kernel: nested-list support is inconsistent —
+works as `cudaq.get_state` arguments, fails as `cudaq.sample` arguments
+("Invalid runtime argument type") and as captures
+("getElementType(): incompatible function arguments")
+
+### Description
+
+Support for nested lists (`list[list[float]]`, `list[list[pauli_word]]`)
+differs by code path:
+
+| Path | Result |
+|---|---|
+| annotated argument, launched via `cudaq.get_state` | works |
+| annotated argument, launched via `cudaq.sample` | "Invalid runtime argument type" |
+| captured from enclosing scope | "getElementType(): incompatible function arguments" |
+
+The same kernel with the same data succeeds or fails depending on the
+launcher, so the argument validation is per-launch-path rather than
+per-kernel. The capture failure additionally breaks the kernel-factory
+idiom exactly where grouped data is natural (e.g. UCC excitation groups:
+one parameter per group of Pauli words); factories must flatten grouped
+data into parallel flat lists before capture.
+
+### Minimal reproducer
+
+```python
+import cudaq
+cudaq.set_target("qpp-cpu")
+
+@cudaq.kernel
+def arg_form(words: list[list[cudaq.pauli_word]], coeffs: list[list[float]]):
+    q = cudaq.qvector(2)
+    for i in range(len(words)):
+        group = words[i]
+        gcoeffs = coeffs[i]
+        for j in range(len(group)):
+            exp_pauli(gcoeffs[j], q, group[j])
+
+nested_words = [[cudaq.pauli_word("XY"), cudaq.pauli_word("YX")],
+                [cudaq.pauli_word("ZI")]]
+nested_coeffs = [[0.5, -0.5], [1.0]]
+cudaq.get_state(arg_form, nested_words, nested_coeffs)  # OK
+cudaq.sample(arg_form, nested_words, nested_coeffs)
+# error: Invalid runtime argument type. Argument of type
+# list[cudaq...pauli_word] was provided (truncated diagnostic).
+
+def make_kernel():
+    words = nested_words
+    coeffs = nested_coeffs
+
+    @cudaq.kernel
+    def capture_form():
+        q = cudaq.qvector(2)
+        for i in range(len(words)):
+            group = words[i]
+            gcoeffs = coeffs[i]
+            for j in range(len(group)):
+                exp_pauli(gcoeffs[j], q, group[j])
+
+    return capture_form
+
+cudaq.sample(make_kernel())
+# RuntimeError: getElementType(): incompatible function arguments. ...
+```
+
+### Expected / suggested
+
+Make the three paths consistent: `sample` should accept whatever
+`get_state` accepts, and captures should lower like arguments (or emit a
+diagnostic naming the captured variable and its unsupported type).
+
+## Issue 7 (enhancement) — `exp_pauli` has no individual-qubit operand form in Python
+
+**Title:** Python kernel: `exp_pauli(theta, "YX", q[a], q[b])` (the C++
+operand form) is rejected with "too many values"
+
+### Description
+
+C++ kernels can apply a Pauli-word exponential to explicitly listed qubits:
+`exp_pauli(theta, "YX", qubits[a], qubits[b])`. The Python kernel builder
+only accepts `exp_pauli(angle, register, word)` where the word spans the
+whole register. For *contiguous* qubit pairs a runtime slice works
+(`exp_pauli(theta, qubits[a:a + 2], "YX")` — verified, including with
+runtime `a`), but non-contiguous operand sets require padding the word with
+identities to full register width on the host.
+
+### Minimal reproducer
+
+```python
+import cudaq
+cudaq.set_target("qpp-cpu")
+
+@cudaq.kernel
+def kernel(theta: float):
+    q = cudaq.qvector(3)
+    exp_pauli(theta, "YX", q[0], q[1])   # error: too many values
+
+# Works: contiguous slice
+@cudaq.kernel
+def kernel2(theta: float, a: int):
+    q = cudaq.qvector(4)
+    exp_pauli(theta, q[a:a + 2], "YX")   # OK, runtime offset supported
+```
+
+### Why it matters
+
+Porting C++ device kernels that use the individual-qubit form (e.g. Givens
+rotations on orbital pairs) requires either adjacency guarantees (slices)
+or host-side full-width word construction. Parity with the C++ operand
+form would make ports mechanical.
+
+## Issue 8 (usability) — `cudaq.pauli_word` is opaque in Python
+
+**Title:** `cudaq.pauli_word` exposes no way to read the word back
+(`str()` returns the repr), inconsistent with
+`SpinOperatorTerm.get_pauli_word()` returning `str`
+
+### Description
+
+A `cudaq.pauli_word` constructed in Python has no public attributes or
+methods (`dir()` shows none) and `str(word)` returns the object repr
+(`<cudaq.mlir._mlir_libs...pauli_word object at 0x...>`), so host code
+cannot inspect, compare, or serialize the word it wraps. Meanwhile
+`SpinOperatorTerm.get_pauli_word(n)` returns a plain Python `str`. The
+asymmetry forces libraries to standardize on plain strings host-side and
+convert to `cudaq.pauli_word` only at capture time (strings are accepted
+as `list[cudaq.pauli_word]` *arguments* already — see issue 5).
+
+### Minimal reproducer
+
+```python
+import cudaq
+w = cudaq.pauli_word("XIZ")
+print([m for m in dir(w) if not m.startswith("_")])  # []
+print(str(w))   # <cudaq.mlir._mlir_libs._quakeDialects.cudaq_runtime.pauli_word object at ...>
+```
+
+### Expected / suggested
+
+Give `cudaq.pauli_word` a `__str__` (and ideally `__eq__`/`__repr__`)
+returning the word string.
+
 ## Suggested labels
 
-All: `python`, `kernel-builder`; issues 1, 2, and 4 `bug` (4 is the most severe — silent wrong circuits), issue 3 arguably enhancement. Issue 1 is the higher-impact one
-(it blocks aggregated kernel-argument types outright); Issue 2 has an easy
-workaround once diagnosed, so the diagnostic improvement alone would help.
+All: `python`, `kernel-builder`. Issues 1, 2, 4, 5, 6 `bug`
+(4 is the most severe — silent wrong circuits); issues 3 and 7 enhancement;
+issue 8 usability/docs. Filing priority: 4 (miscompile), then 1 (blocks
+aggregated argument types), then the capture-path trio 2/5/6 (could be filed
+as one issue: "capture lowering lags argument lowering" with three
+reproducers), then 3, 7, 8.
