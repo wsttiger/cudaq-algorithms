@@ -11,7 +11,19 @@ fail when CAPTURED from the enclosing scope, which breaks the kernel-factory
 idiom). Issue 3 is a control-composition gap, issue 4 is a silent
 control-flow miscompile (the most severe), issue 7 is an operand-form gap,
 and issue 8 is an API-usability inconsistency. Every reproducer was executed
-and verified against the build below. None filed yet.
+and verified against the build below.
+
+**FILED 2026-07-05** against NVIDIA/cuda-quantum (as wsttiger; drafts 2, 5,
+and 6 consolidated into one capture-path issue):
+
+| Draft | Upstream issue |
+|---|---|
+| 4 (early return miscompile) | https://github.com/NVIDIA/cuda-quantum/issues/4845 |
+| 1 (dataclass negative int) | https://github.com/NVIDIA/cuda-quantum/issues/4846 |
+| 2 + 5 + 6 (capture-path trio + sample/get_state inconsistency) | https://github.com/NVIDIA/cuda-quantum/issues/4847 |
+| 3 (mixed control sets / cudaq.control composite) | https://github.com/NVIDIA/cuda-quantum/issues/4848 |
+| 7 (exp_pauli operand form) | https://github.com/NVIDIA/cuda-quantum/issues/4849 |
+| 8 (pauli_word opacity) | https://github.com/NVIDIA/cuda-quantum/issues/4850 |
 
 Environment for all:
 - CUDA-Q built from source, commit `0be565550f4c23affdcbed9e4eaec38d2d0915e6`
