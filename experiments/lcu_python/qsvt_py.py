@@ -296,17 +296,6 @@ class QSVT:
 
         return controlled_qsvt_kernel
 
-    def transform(self, ket, sequence, convention=None):
-        """Return the good-subspace state after the sequence (simulation).
-
-        For an eigenstate of H with eigenvalue lambda this equals
-        ``evaluate_response(sequence, lambda / alpha)`` times the input.
-        """
-        from pauli_lcu_py import state_from
-
-        state = cudaq.get_state(self.kernel(sequence, convention),
-                                state_from(ket))
-        return self.encoding.good_subspace(state)
 
 
 # ============================================================================

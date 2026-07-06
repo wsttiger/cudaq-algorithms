@@ -22,7 +22,7 @@ Design highlights over the bound C++ API:
 
       enc = PauliLCU({"ZI": 0.7, "XX": 0.19, "IZ": -0.43})
       kernel = enc.encode_kernel()            # @cudaq.kernel(state)
-      good = enc.good_subspace(cudaq.get_state(kernel, state))
+      # statevector postselection lives in sim_utils (tests/examples only)
 
 * No arity ladder. CUDA-Q Python kernels accept a whole ``qview`` as the
   control register (``x.ctrl(ancilla, target)``), so the multi-controlled
@@ -506,33 +506,3 @@ class PauliLCU:
 
         return walked
 
-    # ------------------------------------------------------------------
-    # Simulation conveniences
-    # ------------------------------------------------------------------
-
-    def good_subspace(self, state):
-        """Postselect the all-zero-ancilla block of a simulated statevector.
-
-        The factories allocate the system register first, so with CUDA-Q's
-        little-endian statevector order (q[0] = least-significant bit) the
-        good subspace is the first contiguous block of 2**num_system
-        amplitudes.
-        """
-        import numpy as np
-
-        vector = np.asarray(state, dtype=np.complex128)
-        expected = 1 << (self.num_system + self.num_ancilla)
-        if vector.shape != (expected,):
-            raise ValueError(
-                f"expected a statevector of dimension {expected}, "
-                f"got shape {vector.shape}")
-        return vector[:1 << self.num_system].copy()
-
-    def action(self, ket):
-        """Return (H/alpha)|ket> by simulating the encoding and postselecting.
-
-        Simulation-only convenience (uses ``cudaq.get_state``). Multiply by
-        ``alpha`` to recover H|ket>.
-        """
-        state = cudaq.get_state(self.encode_kernel(), state_from(ket))
-        return self.good_subspace(state)

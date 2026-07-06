@@ -9,6 +9,7 @@ built to explore what an intuitive Python API looks like. No compiled
 pauli_lcu_py.py                    block encoding: kernels + PauliLCU
 qubitization_py.py                 walks, observables, Walk (moments)
 qsvt_py.py                         PhaseSequence, QSVT, host response model
+sim_utils.py                       simulation-only helpers (tests/examples)
 test_pauli_lcu_py.py               dense-reference tests (pytest, qpp-cpu)
 test_qubitization_py.py            walk/moment/adjoint tests
 test_qsvt_py.py                    response/convention/QSPPACK tests
@@ -54,8 +55,6 @@ enc.terms                  # [(coeff, word), ...]
 enc.constant_term          # sum of identity terms
 
 kernel = enc.encode_kernel()          # @cudaq.kernel(state): full U_A
-good = enc.good_subspace(cudaq.get_state(kernel, state))
-hpsi_over_alpha = enc.action(psi)     # (H/alpha)|psi> in one call
 ```
 
 ### Qubitization (`qubitization_py`)
@@ -88,7 +87,6 @@ seq = qsvt.PhaseSequence(phases, walk_directions=["forward", "adjoint"])
 
 transformer = qsvt.QSVT(enc)
 kernel = transformer.kernel(seq)      # @cudaq.kernel(state)
-good = transformer.transform(psi, seq)
 
 # Host model. NOTE the convention: x is the plain scaled eigenvalue
 # lambda/alpha — the walk's -H/alpha sign is folded into the model, so
@@ -99,6 +97,24 @@ value = qsvt.evaluate_response(seq, x)
 evolved = qsvt.recover_real_time_evolution(cos_state, sin_state,
                                            cos_phases, sin_phases)
 ```
+
+### Simulation helpers (`sim_utils` — tests/examples only)
+
+`cudaq.get_state` is a simulator-only API, so nothing in the library
+modules calls it. Statevector-based conveniences live in `sim_utils` and
+are imported only by the tests, demo, and examples:
+
+```python
+import sim_utils as sim
+
+good = sim.good_subspace(enc, state)     # postselect the |0..0>-ancilla block
+hpsi = sim.action(enc, psi)              # (H/alpha)|psi>
+out = sim.transform(transformer, psi, seq)
+psi0 = sim.state_from(ket)               # precision-aware cudaq.State
+```
+
+(`Walk.moment`/`moments` stay in the library: they measure through
+`cudaq.observe`, which is a hardware-legitimate path.)
 
 Escape hatch at every level: the module-level kernels (`lcu.prepare`,
 `lcu.select`, `lcu.apply`, `lcu.reflect_about_zero`, `qub.adjoint_walk`,
@@ -168,8 +184,9 @@ tests for walks, roundtrips, and sequences, both control states).
 
 ## Deliberate scope cuts
 
-- `action()`/`transform()`/`good_subspace()` are simulation conveniences and
-  say so; the kernel factories and observables are the hardware-shaped path.
+- Simulation conveniences (`action`/`transform`/`good_subspace`) live in
+  `sim_utils`, outside the library modules; the kernel factories and
+  observables are the hardware-shaped path.
 - Phase *generation* stays external (QSPPACK), matching the library's scope
   decision.
 

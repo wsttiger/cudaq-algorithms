@@ -21,6 +21,7 @@ import cudaq
 from cudaq import spin
 
 import pauli_lcu_py as lcu
+import sim_utils as sim
 
 
 # Override with e.g. LCU_PY_TARGET=nvidia-fp64 to run on a GPU simulator.
@@ -74,7 +75,7 @@ def test_action_matches_dense_hamiltonian():
     ket = random_ket(2, seed=7)
     expected = dense_matrix(list((c, w) for w, c in FOUR_TERMS.items()),
                             2) @ ket / enc.alpha
-    assert np.allclose(enc.action(ket), expected, atol=1e-10)
+    assert np.allclose(sim.action(enc, ket), expected, atol=1e-10)
 
 
 def test_spin_operator_and_pairs_inputs_agree():
@@ -84,7 +85,7 @@ def test_spin_operator_and_pairs_inputs_agree():
 
     assert from_op.alpha == pytest.approx(from_pairs.alpha)
     ket = random_ket(2, seed=11)
-    assert np.allclose(from_op.action(ket), from_pairs.action(ket), atol=1e-10)
+    assert np.allclose(sim.action(from_op, ket), sim.action(from_pairs, ket), atol=1e-10)
 
 
 def test_single_term_negative_coefficient_keeps_sign():
@@ -94,7 +95,7 @@ def test_single_term_negative_coefficient_keeps_sign():
 
     ket = random_ket(2, seed=3)
     expected = dense_matrix([(-0.5, "XZ")], 2) @ ket / enc.alpha
-    assert np.allclose(enc.action(ket), expected, atol=1e-10)
+    assert np.allclose(sim.action(enc, ket), expected, atol=1e-10)
 
 
 def test_identity_term_handling():
@@ -129,7 +130,7 @@ def test_walk_moments_match_chebyshev():
         state = cudaq.get_state(enc.walk_kernel(power=k),
                                 lcu.state_from(ket))
         zero_probability = float(
-            np.sum(np.abs(enc.good_subspace(state))**2))
+            np.sum(np.abs(sim.good_subspace(enc, state))**2))
         moment = 2.0 * zero_probability - 1.0
 
         expected = sum(
