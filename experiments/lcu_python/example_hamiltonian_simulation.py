@@ -6,12 +6,10 @@
 # This source code and the accompanying materials are made available under     #
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
-"""Hamiltonian simulation with the pure-Python PauliLCU + QSVT prototype.
+"""Hamiltonian simulation with the PauliLCU block encoding and QSVT.
 
 Evolves a 4-qubit Pauli Hamiltonian with QSPPACK-generated phases and checks
-the result against exact diagonalization. Compare with
-examples/hamiltonian_simulation/qsvt_pauli_lcu.py: the quantum part of this
-workflow is ~10 lines because the encoding object owns the kernel plumbing.
+the result against exact diagonalization.
 
 Requires qsppack and scipy.  Run with:
     PYTHONPATH=/path/to/cudaq python3 example_hamiltonian_simulation.py
@@ -27,9 +25,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import cudaq
 
-import pauli_lcu_py as lcu
+import cudaq_algorithms  # noqa: F401 — registers cudaq.algorithms
 import sim_utils as sim
-import qsvt_py as qsvt
+from cudaq.algorithms import (PauliLCU, PhaseSequence, QSVT,
+                              recover_real_time_evolution)
 
 HAMILTONIAN = {
     "ZIII": 0.70,
@@ -96,11 +95,11 @@ def dense_matrix(terms, num_qubits):
 
 
 def main():
-    cudaq.set_target(os.environ.get("LCU_PY_TARGET", "qpp-cpu"))
+    cudaq.set_target(os.environ.get("CUDAQ_DEFAULT_SIMULATOR", "qpp-cpu"))
 
-    # -- the entire quantum workflow -------------------------------------
-    encoding = lcu.PauliLCU(HAMILTONIAN)
-    transformer = qsvt.QSVT(encoding)
+    # -- quantum workflow -------------------------------------------------
+    encoding = PauliLCU(HAMILTONIAN)
+    transformer = QSVT(encoding)
     tau = encoding.alpha * TIME
     cos_phases, sin_phases = qsppack_phases(tau, DEGREE)
 
@@ -109,12 +108,12 @@ def main():
     psi /= np.linalg.norm(psi)
 
     cos_state = sim.transform(
-        transformer, psi, qsvt.PhaseSequence(cos_phases, convention="qsp"))
+        transformer, psi, PhaseSequence(cos_phases, convention="qsp"))
     sin_state = sim.transform(
-        transformer, psi, qsvt.PhaseSequence(sin_phases, convention="qsp"))
-    evolved = qsvt.recover_real_time_evolution(cos_state, sin_state,
-                                               cos_phases, sin_phases)
-    # ---------------------------------------------------------------------
+        transformer, psi, PhaseSequence(sin_phases, convention="qsp"))
+    evolved = recover_real_time_evolution(cos_state, sin_state,
+                                          cos_phases, sin_phases)
+    # ----------------------------------------------------------------------
 
     matrix = dense_matrix(HAMILTONIAN, encoding.num_system)
     eigenvalues, eigenvectors = np.linalg.eigh(matrix)

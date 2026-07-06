@@ -5,16 +5,15 @@
 # This source code and the accompanying materials are made available under     #
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
-"""Pure-Python qubitization on top of the PauliLCU prototype.
+"""Qubitization walks over a PauliLCU block encoding.
 
-Walk kernels, reflection/SELECT observables, and a ``Walk`` object that
-measures Chebyshev moments ``<T_k(H/alpha)>`` with the QEL even/odd
-convention — everything a quantum Lanczos workflow needs, with no compiled
-bindings.
+Provides walk kernels (forward, adjoint, and controlled variants), the
+reflection and SELECT observables, and a ``Walk`` object that measures
+Chebyshev moments ``<T_k(H/alpha)>`` with the quantum exact Lanczos (QEL)
+even/odd convention.
 
-Conventions match the C++ library: one walk step is SELECT followed by a
-reflection about the PREPARE state, the walk block is ``-H/alpha``, and
-moments are measured as
+One walk step is SELECT followed by a reflection about the PREPARE state,
+the walk block is ``-H/alpha``, and moments are measured as
 
 * even ``k = 2p``:  reflection observable ``2|0..0><0..0| - I`` on the
   ancillas after PREPARE, p walks, UNPREPARE;
@@ -27,8 +26,8 @@ from __future__ import annotations
 import cudaq
 from cudaq import spin
 
-from pauli_lcu_py import (PauliLCU, controlled_select, prepare,
-                          reflect_about_zero, select, unprepare, walk)
+from .pauli_lcu import (PauliLCU, controlled_select, prepare,
+                        reflect_about_zero, select, unprepare, walk)
 
 FORWARD = 0
 ADJOINT = 1
@@ -349,7 +348,7 @@ class Walk:
 
     def moment(self, ket, order: int) -> float:
         """Measure the Chebyshev moment <T_order(H/alpha)> for |ket>."""
-        from pauli_lcu_py import state_from
+        from .pauli_lcu import state_from
 
         order = int(order)
         if order < 0:

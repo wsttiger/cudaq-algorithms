@@ -5,33 +5,17 @@
 # This source code and the accompanying materials are made available under     #
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
-"""Tests for the pure-Python qubitization prototype (dense references)."""
-
-import os
-import sys
-from pathlib import Path
+"""Correctness tests for qubitization walks and moments (dense references)."""
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
 import cudaq
 
-import pauli_lcu_py as lcu
-import qubitization_py as qub
-from test_pauli_lcu_py import dense_matrix, random_ket
-
-
-# Override with e.g. LCU_PY_TARGET=nvidia-fp64 to run on a GPU simulator.
-SIMULATION_TARGET = os.environ.get("LCU_PY_TARGET", "qpp-cpu")
-
-
-@pytest.fixture(autouse=True)
-def simulation_target():
-    cudaq.set_target(SIMULATION_TARGET)
-    yield
-    cudaq.reset_target()
+import cudaq_algorithms  # noqa: F401 — registers cudaq.algorithms
+from cudaq.algorithms import (PauliLCU, Walk, reflection_observable,
+                              select_observable, state_from)
+from test_pauli_lcu import dense_matrix, random_ket
 
 
 def exact_chebyshev_moments(terms, num_qubits, alpha, ket, count):
@@ -50,8 +34,8 @@ FOUR_TERMS_2Q = {"ZI": 0.70, "IZ": -0.43, "XX": 0.19, "YZ": 0.11}
 
 
 def test_moments_match_dense_chebyshev_1q():
-    enc = lcu.PauliLCU(THREE_TERMS_1Q)
-    walk = qub.Walk(enc)
+    enc = PauliLCU(THREE_TERMS_1Q)
+    walk = Walk(enc)
 
     theta = 0.7
     ket = np.array([np.cos(theta / 2), np.sin(theta / 2)],
@@ -64,8 +48,8 @@ def test_moments_match_dense_chebyshev_1q():
 
 
 def test_moments_match_dense_chebyshev_2q():
-    enc = lcu.PauliLCU(FOUR_TERMS_2Q)
-    walk = qub.Walk(enc)
+    enc = PauliLCU(FOUR_TERMS_2Q)
+    walk = Walk(enc)
 
     ket = np.zeros(4, dtype=np.complex128)
     ket[1] = 1.0  # basis state, HF-style
@@ -77,8 +61,8 @@ def test_moments_match_dense_chebyshev_2q():
 
 
 def test_adjoint_walk_inverts_walk():
-    enc = lcu.PauliLCU(FOUR_TERMS_2Q)
-    walk = qub.Walk(enc)
+    enc = PauliLCU(FOUR_TERMS_2Q)
+    walk = Walk(enc)
 
     ket = random_ket(2, seed=5)
     reference = np.zeros(1 << (enc.num_system + enc.num_ancilla),
@@ -87,28 +71,26 @@ def test_adjoint_walk_inverts_walk():
 
     for power in (1, 2, 3):
         state = cudaq.get_state(walk.roundtrip_kernel(power=power),
-                                lcu.state_from(ket))
+                                state_from(ket))
         assert np.allclose(np.asarray(state), reference, atol=1e-10), \
             f"roundtrip failed at power {power}"
 
 
 def test_walk_kernel_options():
-    enc = lcu.PauliLCU(THREE_TERMS_1Q)
-    walk = qub.Walk(enc)
+    enc = PauliLCU(THREE_TERMS_1Q)
+    walk = Walk(enc)
     ket = np.array([1.0, 0.0], dtype=np.complex128)
 
     # uncompute=True must agree with the PauliLCU walk_kernel factory.
-    a = np.asarray(cudaq.get_state(walk.kernel(power=2),
-                                   lcu.state_from(ket)))
-    b = np.asarray(cudaq.get_state(enc.walk_kernel(power=2),
-                                   lcu.state_from(ket)))
+    a = np.asarray(cudaq.get_state(walk.kernel(power=2), state_from(ket)))
+    b = np.asarray(cudaq.get_state(enc.walk_kernel(power=2), state_from(ket)))
     assert np.allclose(a, b, atol=1e-12)
 
 
 def test_reflection_and_select_observables_shapes():
-    enc = lcu.PauliLCU(FOUR_TERMS_2Q)
-    reflection = qub.reflection_observable(enc)
-    select = qub.select_observable(enc)
+    enc = PauliLCU(FOUR_TERMS_2Q)
+    reflection = reflection_observable(enc)
+    select = select_observable(enc)
     # Spot check: <0...0| R |0...0> = +1 on the ancilla block.
     # (Full physics is covered by the moment tests.)
     assert reflection is not None
@@ -116,13 +98,13 @@ def test_reflection_and_select_observables_shapes():
 
 
 def test_walk_rejects_degenerate_encoding():
-    single = lcu.PauliLCU({"XZ": -0.5})
+    single = PauliLCU({"XZ": -0.5})
     with pytest.raises(ValueError):
-        qub.Walk(single)
+        Walk(single)
     with pytest.raises(ValueError):
-        qub.reflection_observable(single)
+        reflection_observable(single)
     with pytest.raises(ValueError):
-        qub.select_observable(single)
+        select_observable(single)
 
 
 def _controlled_layout_maps(num_system, num_ancilla):
@@ -141,20 +123,20 @@ def _controlled_layout_maps(num_system, num_ancilla):
 
 
 def test_controlled_walk_respects_control():
-    enc = lcu.PauliLCU(FOUR_TERMS_2Q)
-    walk = qub.Walk(enc)
+    enc = PauliLCU(FOUR_TERMS_2Q)
+    walk = Walk(enc)
     ket = random_ket(2, seed=13)
     unc_index, con_index = _controlled_layout_maps(enc.num_system,
                                                    enc.num_ancilla)
 
     reference = np.asarray(
-        cudaq.get_state(walk.kernel(power=2), lcu.state_from(ket)))
+        cudaq.get_state(walk.kernel(power=2), state_from(ket)))
     on_state = np.asarray(
         cudaq.get_state(walk.controlled_kernel(power=2, control_state=1),
-                        lcu.state_from(ket)))
+                        state_from(ket)))
     off_state = np.asarray(
         cudaq.get_state(walk.controlled_kernel(power=2, control_state=0),
-                        lcu.state_from(ket)))
+                        state_from(ket)))
 
     for anc in range(1 << enc.num_ancilla):
         for sys in range(1 << enc.num_system):
@@ -171,8 +153,8 @@ def test_controlled_walk_respects_control():
 
 
 def test_controlled_adjoint_walk_inverts_controlled_walk():
-    enc = lcu.PauliLCU(FOUR_TERMS_2Q)
-    walk = qub.Walk(enc)
+    enc = PauliLCU(FOUR_TERMS_2Q)
+    walk = Walk(enc)
     ket = random_ket(2, seed=17)
     _, con_index = _controlled_layout_maps(enc.num_system, enc.num_ancilla)
 
@@ -181,7 +163,7 @@ def test_controlled_adjoint_walk_inverts_controlled_walk():
             cudaq.get_state(
                 walk.controlled_roundtrip_kernel(power=2,
                                                  control_state=control_state),
-                lcu.state_from(ket)))
+                state_from(ket)))
         for anc in range(1 << enc.num_ancilla):
             for sys in range(1 << enc.num_system):
                 expected = ket[sys] if anc == 0 else 0.0
