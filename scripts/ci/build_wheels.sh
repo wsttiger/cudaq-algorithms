@@ -109,16 +109,12 @@ cp "pyproject.toml.cu${cuda_major}" pyproject.toml
 # (experiments/lcu_python/cudaq_algorithms), so its modules work unchanged as a
 # subpackage; its __init__ also registers the cudaq.algorithms namespace. The
 # Suzuki-Trotter module is appended as .trotter. Tests, examples, conftest,
-# READMEs, and the simulation-only sim_utils stay in experiments/.
+# and READMEs stay in experiments/; sim_utils ships as part of the package.
 experimental_pkg=python/cudaq_algorithms/experimental
 rm -rf "$experimental_pkg"
 if [[ -d experiments ]]; then
     mkdir -p "$experimental_pkg"
-    cp experiments/lcu_python/cudaq_algorithms/__init__.py \
-       experiments/lcu_python/cudaq_algorithms/pauli_lcu.py \
-       experiments/lcu_python/cudaq_algorithms/qsvt.py \
-       experiments/lcu_python/cudaq_algorithms/qubitization.py \
-       "$experimental_pkg/"
+    cp experiments/lcu_python/cudaq_algorithms/*.py "$experimental_pkg/"
     cp experiments/suzuki_trotter_python/trotter_py.py "$experimental_pkg/trotter.py"
     cat >> "$experimental_pkg/__init__.py" <<'PYEOF'
 
