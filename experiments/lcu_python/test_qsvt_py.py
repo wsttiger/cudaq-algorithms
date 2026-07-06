@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cudaq
 
 import pauli_lcu_py as lcu
+import sim_utils as sim
 import qsvt_py as qsvt
 from test_pauli_lcu_py import dense_matrix, random_ket
 
@@ -75,7 +76,7 @@ def test_response_matches_circuit_on_eigenstate():
 
     for phases in ([0.3, -0.4], [0.2, -0.5, 0.1, 0.4]):
         seq = qsvt.PhaseSequence(phases)
-        good = transformer.transform(eigenvector, seq)
+        good = sim.transform(transformer, eigenvector, seq)
         # x is the plain scaled eigenvalue — no caller-side negation.
         response = qsvt.evaluate_response(seq, lam / enc.alpha)
         assert np.allclose(good, response * eigenvector, atol=1e-10)
@@ -99,7 +100,7 @@ def test_full_block_matches_host_model_with_mixed_directions():
     for basis in range(4):
         ket = np.zeros(4, dtype=np.complex128)
         ket[basis] = 1.0
-        columns.append(transformer.transform(ket, seq))
+        columns.append(sim.transform(transformer, ket, seq))
     device_block = np.column_stack(columns)
 
     response = np.array(
@@ -115,8 +116,8 @@ def test_qsp_sequence_executes_as_doubled_projector_phases():
 
     qsp_seq = qsvt.PhaseSequence([0.15, -0.3, 0.45], convention="qsp")
     doubled = qsvt.PhaseSequence([0.3, -0.6, 0.9])
-    a = transformer.transform(ket, qsp_seq)
-    b = transformer.transform(ket, doubled)
+    a = sim.transform(transformer, ket, qsp_seq)
+    b = sim.transform(transformer, ket, doubled)
     assert np.allclose(a, b, atol=1e-12)
 
     # And the two host conventions genuinely differ.
@@ -130,7 +131,7 @@ def test_degree_zero_sequence_is_a_signal_phase():
     enc = lcu.PauliLCU(TWO_TERMS_1Q)
     transformer = qsvt.QSVT(enc)
     ket = random_ket(1, seed=4)
-    good = transformer.transform(ket, [0.7])
+    good = sim.transform(transformer, ket, [0.7])
     assert np.allclose(good, np.exp(0.7j) * ket, atol=1e-12)
 
 
@@ -179,9 +180,9 @@ def test_hamiltonian_simulation_with_qsppack_phases():
     ket = rng.normal(size=4).astype(np.complex128)
     ket /= np.linalg.norm(ket)
 
-    cos_state = transformer.transform(
+    cos_state = sim.transform(transformer, 
         ket, qsvt.PhaseSequence(cos_phases, convention="qsp"))
-    sin_state = transformer.transform(
+    sin_state = sim.transform(transformer, 
         ket, qsvt.PhaseSequence(sin_phases, convention="qsp"))
     evolved = qsvt.recover_real_time_evolution(cos_state, sin_state,
                                                cos_phases, sin_phases)

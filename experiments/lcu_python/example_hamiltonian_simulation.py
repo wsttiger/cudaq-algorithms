@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cudaq
 
 import pauli_lcu_py as lcu
+import sim_utils as sim
 import qsvt_py as qsvt
 
 HAMILTONIAN = {
@@ -107,10 +108,10 @@ def main():
     psi = rng.normal(size=1 << encoding.num_system).astype(np.complex128)
     psi /= np.linalg.norm(psi)
 
-    cos_state = transformer.transform(
-        psi, qsvt.PhaseSequence(cos_phases, convention="qsp"))
-    sin_state = transformer.transform(
-        psi, qsvt.PhaseSequence(sin_phases, convention="qsp"))
+    cos_state = sim.transform(
+        transformer, psi, qsvt.PhaseSequence(cos_phases, convention="qsp"))
+    sin_state = sim.transform(
+        transformer, psi, qsvt.PhaseSequence(sin_phases, convention="qsp"))
     evolved = qsvt.recover_real_time_evolution(cos_state, sin_state,
                                                cos_phases, sin_phases)
     # ---------------------------------------------------------------------

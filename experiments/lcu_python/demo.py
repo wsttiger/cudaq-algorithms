@@ -23,6 +23,7 @@ import cudaq
 from cudaq import spin
 
 import pauli_lcu_py as lcu
+import sim_utils as sim
 
 
 def banner(title):
@@ -48,7 +49,7 @@ def main():
     rng = np.random.default_rng(7)
     psi = rng.normal(size=4).astype(np.complex128)
     psi /= np.linalg.norm(psi)
-    good = enc.action(psi)
+    good = sim.action(enc, psi)
     print(f"|| action(psi) ||           = {np.linalg.norm(good):.6f}")
     print(f"success probability         = {np.linalg.norm(good)**2:.6f}")
 
@@ -56,7 +57,7 @@ def main():
     kernel = enc.encode_kernel()
     state = cudaq.get_state(kernel, lcu.state_from(psi))
     print(f"full statevector dimension  = {len(np.asarray(state))}")
-    print(f"good-subspace dimension     = {len(enc.good_subspace(state))}")
+    print(f"good-subspace dimension     = {len(sim.good_subspace(enc, state))}")
 
     banner("5. Qubitization walks (Chebyshev moments)")
     moment_enc = lcu.PauliLCU({"I": 0.2, "X": 0.5, "Z": 0.3})
@@ -64,7 +65,7 @@ def main():
     for k in (1, 2, 3):
         walked = cudaq.get_state(moment_enc.walk_kernel(power=k),
                                  lcu.state_from(ket))
-        p0 = float(np.sum(np.abs(moment_enc.good_subspace(walked))**2))
+        p0 = float(np.sum(np.abs(sim.good_subspace(moment_enc, walked))**2))
         print(f"<T_{2*k}(H/alpha)> from the circuit = {2 * p0 - 1:+.10f}")
 
     banner("6. Escape hatch: compose inside your own kernel")
@@ -79,7 +80,7 @@ def main():
         lcu.select(ancilla, system, controls, ops, lengths, signs)
         lcu.unprepare(ancilla, angles)
 
-    manual = enc.good_subspace(cudaq.get_state(custom,
+    manual = sim.good_subspace(enc, cudaq.get_state(custom,
                                                lcu.state_from(psi)))
     print(f"manual composition matches action(): "
           f"{np.allclose(manual, good, atol=1e-12)}")
@@ -88,10 +89,10 @@ def main():
     negative_single = lcu.PauliLCU({"XZ": -0.5})
     positive_single = lcu.PauliLCU({"XZ": +0.5})
     print(negative_single)
-    opposite = np.allclose(negative_single.action(psi),
-                           -positive_single.action(psi), atol=1e-12)
+    opposite = np.allclose(sim.action(negative_single, psi),
+                           -sim.action(positive_single, psi), atol=1e-12)
     print(f"-0.5*XZ encodes the OPPOSITE state of +0.5*XZ: {opposite}")
-    print(f"action norm = {np.linalg.norm(negative_single.action(psi)):.6f} "
+    print(f"action norm = {np.linalg.norm(sim.action(negative_single, psi)):.6f} "
           f"(single unitary Pauli word: exactly 1)")
 
     print()
