@@ -5,38 +5,27 @@
 # This source code and the accompanying materials are made available under     #
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
-"""Pure-Python Pauli LCU block encoding — API-surface experiment.
+"""Pauli LCU block encoding.
 
-This is a self-contained prototype of the PauliLCU block-encoding feature
-implemented entirely in Python: the LCU decomposition, PREPARE-angle
-computation, and the PREPARE/SELECT/walk circuits are all here, with no
-dependency on the compiled cudaq-algorithms bindings. It exists to explore
-what an intuitive Python API surface looks like; it is not a supported
-library component.
+Implements the linear-combination-of-unitaries block encoding of a Pauli-sum
+Hamiltonian: the LCU decomposition, PREPARE-angle computation, and the
+PREPARE/SELECT/walk device kernels (including controlled variants).
 
-Design highlights over the bound C++ API:
+``PauliLCU`` is the primary entry point. It accepts a ``cudaq.SpinOperator``,
+a ``{"XZI...": coeff}`` mapping, or ``[(coeff, word), ...]`` pairs, and
+provides ready-to-run kernel factories::
 
-* One object, no flattening in user code. ``PauliLCU`` accepts a
-  ``cudaq.SpinOperator``, a ``{"XZI...": coeff}`` mapping, or
-  ``[(coeff, word), ...]`` pairs, and hands back ready-to-run kernels::
+    enc = PauliLCU({"ZI": 0.7, "XX": 0.19, "IZ": -0.43})
+    kernel = enc.encode_kernel()            # @cudaq.kernel(state)
 
-      enc = PauliLCU({"ZI": 0.7, "XX": 0.19, "IZ": -0.43})
-      kernel = enc.encode_kernel()            # @cudaq.kernel(state)
-      # statevector postselection lives in sim_utils (tests/examples only)
+The module-level kernels (``prepare``, ``select``, ``apply``, ...) are
+composable from user kernels; ``PauliLCU.kernel_args`` supplies the flattened
+arrays they take as arguments. Statevector-based conveniences (postselection,
+``action``) live in ``sim_utils``, outside the library surface.
 
-* No arity ladder. CUDA-Q Python kernels accept a whole ``qview`` as the
-  control register (``x.ctrl(ancilla, target)``), so the multi-controlled
-  gates that require an if/else arity ladder in the C++ device kernels are
-  one line each here, with no 10-ancilla cap.
-
-* The flat arrays still exist — they are what crosses the kernel boundary —
-  but they are produced and captured inside the factories. ``kernel_args``
-  remains as the escape hatch for users composing inside their own kernels.
-
-Conventions match the C++ implementation: the encoding satisfies
-``(<0|_anc ⊗ I) U (|0>_anc ⊗ I) = H / alpha`` with ``alpha = sum(|c_i|)``,
-and the qubitization walk block is ``-H / alpha`` (the zero reflection
-phases ``|0...0>`` by -1).
+The encoding satisfies ``(<0|_anc ⊗ I) U (|0>_anc ⊗ I) = H / alpha`` with
+``alpha = sum(|c_i|)``, and the qubitization walk block is ``-H / alpha``
+(the zero reflection phases ``|0...0>`` by -1).
 """
 
 from __future__ import annotations
@@ -348,7 +337,7 @@ class PauliLCU:
         self._alpha = sum(abs(c) for c, _ in kept)
         self._num_ancilla = max(0, (len(kept) - 1).bit_length())
 
-        # Flatten once, here, so no caller ever has to.
+        # Precompute the flattened arrays that cross the kernel boundary.
         probabilities = [abs(c) / self._alpha for c, _ in kept]
         probabilities += [0.0] * ((1 << self._num_ancilla) - len(kept))
         self._angles = _prepare_angles(probabilities)

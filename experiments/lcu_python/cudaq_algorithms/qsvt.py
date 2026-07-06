@@ -5,24 +5,21 @@
 # This source code and the accompanying materials are made available under     #
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
-"""Pure-Python QSVT on top of the PauliLCU prototype.
+"""Quantum singular value transformation over a PauliLCU block encoding.
 
-A ``PhaseSequence`` value type (with the qsvt/qsp phase-convention handling
-built in), the phase/walk sequence kernel, a ``QSVT`` object with a kernel
-factory and a one-call ``transform``, and the host-side 2x2 response model
-for validating phases.
+Provides a ``PhaseSequence`` value type with qsvt/qsp phase-convention
+handling built in, the phase/walk sequence kernels (plain and controlled),
+and a ``QSVT`` object with the corresponding kernel factories.
 
-Composition matches the verified library construction: each walk step is the
-full block encoding (PREPARE, SELECT, PREPARE dagger) composed with a
-reflection about the all-zero signal state, and projector phases
-``diag(e^{i phi}, 1)`` act on the same |0...0> signal subspace. The signal
-register starts at |0...0>.
+Each walk step is the full block encoding (PREPARE, SELECT, PREPARE dagger)
+composed with a reflection about the all-zero signal state, and projector
+phases ``diag(e^{i phi}, 1)`` act on the same |0...0> signal subspace. The
+signal register starts at |0...0>.
 
-Sign convention (deliberately simpler than the C++ host helper): the walk's
-``-H/alpha`` sign is folded INTO the step of ``evaluate_response``, so ``x``
-is the plain scaled eigenvalue ``eigenvalue / alpha`` — the circuit's good
-subspace equals ``evaluate_response(sequence, eigenvalue / alpha)`` times the
-eigenvector, with no caller-side negation.
+The walk block encodes ``-H/alpha``; the circuits fold the sign in, so on an
+eigenstate of H with eigenvalue lambda the good-subspace block implements
+``p(lambda / alpha)`` — the polynomial defined by the phase sequence at the
+plain scaled eigenvalue, with no caller-side negation.
 """
 
 from __future__ import annotations
@@ -31,10 +28,10 @@ import math
 
 import cudaq
 
-from pauli_lcu_py import (PauliLCU, controlled_select, prepare,
-                          reflect_about_zero, unprepare)
-from pauli_lcu_py import apply as lcu_apply
-from qubitization_py import controlled_reflect_about_zero
+from .pauli_lcu import (PauliLCU, controlled_select, prepare,
+                        reflect_about_zero, unprepare)
+from .pauli_lcu import apply as lcu_apply
+from .qubitization import controlled_reflect_about_zero
 
 FORWARD = 0
 ADJOINT = 1
@@ -297,63 +294,15 @@ class QSVT:
         return controlled_qsvt_kernel
 
 
-
-# ============================================================================
-# Host-side response model
-# ============================================================================
-
-
-def evaluate_response(sequence, x, convention=None) -> complex:
-    """Scalar response of the sequence at scaled eigenvalue ``x`` in [-1, 1].
-
-    This is the upper-left element of the 2x2 signal model of the circuit
-    built by ``QSVT.kernel``: the good-subspace block of the device circuit
-    acting on an eigenstate with eigenvalue ``lambda`` equals
-    ``evaluate_response(sequence, lambda / alpha)`` times that eigenstate.
-    The walk's -H/alpha sign is folded into the step, so no caller-side
-    negation is needed.
-
-    For qsp-convention sequences the device circuit (which runs doubled
-    projector phases) differs from this model by the global phase
-    ``exp(i * sum(phases))`` per sequence; ``recover_real_time_evolution``
-    accounts for it.
-    """
-    import numpy as np
-
-    seq = _as_sequence(sequence, convention)
-    x = float(x)
-    if abs(x) > 1.0:
-        raise ValueError("x must lie in [-1, 1]")
-    s = math.sqrt(max(0.0, 1.0 - x * x))
-
-    # One forward step of the circuit on the 2D invariant subspace:
-    # reflect_about_zero * block_encoding = diag(-1, 1) @ [[x, s], [s, -x]].
-    step_forward = np.array([[-x, -s], [s, -x]], dtype=np.complex128)
-    step_adjoint = step_forward.T.copy()
-
-    def phase_matrix(phi):
-        if seq.convention == "qsp":
-            return np.diag(
-                [np.exp(1.0j * phi), np.exp(-1.0j * phi)]).astype(complex)
-        return np.diag([np.exp(1.0j * phi), 1.0]).astype(complex)
-
-    matrix = phase_matrix(seq.phases[0])
-    for i in range(1, len(seq.phases)):
-        step = (step_adjoint
-                if seq.walk_directions[i - 1] == ADJOINT else step_forward)
-        matrix = phase_matrix(seq.phases[i]) @ step @ matrix
-    return complex(matrix[0, 0])
-
-
 def recover_real_time_evolution(cos_state, sin_state, cos_phases, sin_phases):
     """Combine cosine/sine QSP components into exp(-i H t)|psi>.
 
-    ``cos_state`` and ``sin_state`` are good-subspace statevectors produced by
-    running qsp-convention sequences through ``QSVT.transform`` (which
+    ``cos_state`` and ``sin_state`` are good-subspace statevectors produced
+    by running qsp-convention sequences through the QSVT circuit (which
     executes doubled projector phases); the per-sequence global phase
     ``exp(i * sum(phases))`` is removed here. Valid for real Hamiltonians and
     real input states, where the cosine/sine parts live in the real/imaginary
-    components. Simulation-validation helper.
+    components.
     """
     import numpy as np
 

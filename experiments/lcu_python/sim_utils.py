@@ -1,6 +1,6 @@
 # ============================================================================ #
 # Copyright (c) 2026 NVIDIA Corporation & Affiliates.                          #
-# All rights reserved.                                                        #
+# All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
@@ -9,7 +9,7 @@
 
 Everything here depends on statevector access (``cudaq.get_state`` /
 postselection slicing), which only exists on simulators. These helpers are
-deliberately OUTSIDE the library modules: the library surface (encodings,
+deliberately outside the library package: the library surface (encodings,
 kernel factories, observables, ``Walk.moment`` via ``cudaq.observe``) is
 hardware-shaped, and nothing in it executes ``get_state``.
 """
@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import cudaq
 
-from pauli_lcu_py import state_from  # re-exported: precision-aware data prep
+# Re-exported: precision-aware initial-state construction.
+from cudaq_algorithms import state_from
 
 __all__ = ["state_from", "good_subspace", "action", "transform"]
 
@@ -54,8 +55,9 @@ def action(encoding, ket):
 def transform(transformer, ket, sequence, convention=None):
     """Return the good-subspace state after a QSVT sequence.
 
-    For an eigenstate of H with eigenvalue lambda this equals
-    ``evaluate_response(sequence, lambda / alpha)`` times the input.
+    For an eigenstate of H with eigenvalue lambda the result is
+    ``p(lambda / alpha)`` times the input, where ``p`` is the polynomial
+    the phase sequence implements.
     """
     state = cudaq.get_state(transformer.kernel(sequence, convention),
                             state_from(ket))

@@ -5,34 +5,19 @@
 # This source code and the accompanying materials are made available under     #
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
-"""Correctness tests for the pure-Python PauliLCU prototype (dense references)."""
+"""Correctness tests for the PauliLCU block encoding (dense references)."""
 
 import math
-import os
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
 import cudaq
 from cudaq import spin
 
-import pauli_lcu_py as lcu
+import cudaq_algorithms  # noqa: F401 — registers cudaq.algorithms
 import sim_utils as sim
-
-
-# Override with e.g. LCU_PY_TARGET=nvidia-fp64 to run on a GPU simulator.
-SIMULATION_TARGET = os.environ.get("LCU_PY_TARGET", "qpp-cpu")
-
-
-@pytest.fixture(autouse=True)
-def simulation_target():
-    cudaq.set_target(SIMULATION_TARGET)
-    yield
-    cudaq.reset_target()
+from cudaq.algorithms import PauliLCU, state_from
 
 
 def dense_matrix(terms, num_qubits):
@@ -67,7 +52,7 @@ FOUR_TERMS = {"ZI": 0.70, "IZ": -0.43, "XX": 0.19, "YZ": 0.11}
 
 
 def test_action_matches_dense_hamiltonian():
-    enc = lcu.PauliLCU(FOUR_TERMS)
+    enc = PauliLCU(FOUR_TERMS)
     assert enc.num_system == 2
     assert enc.num_ancilla == 2
     assert enc.alpha == pytest.approx(1.43)
@@ -80,17 +65,18 @@ def test_action_matches_dense_hamiltonian():
 
 def test_spin_operator_and_pairs_inputs_agree():
     h = 0.7 * spin.z(0) - 0.43 * spin.z(1) + 0.19 * spin.x(0) * spin.x(1)
-    from_op = lcu.PauliLCU(h, num_qubits=2)
-    from_pairs = lcu.PauliLCU([(0.7, "ZI"), (-0.43, "IZ"), (0.19, "XX")])
+    from_op = PauliLCU(h, num_qubits=2)
+    from_pairs = PauliLCU([(0.7, "ZI"), (-0.43, "IZ"), (0.19, "XX")])
 
     assert from_op.alpha == pytest.approx(from_pairs.alpha)
     ket = random_ket(2, seed=11)
-    assert np.allclose(sim.action(from_op, ket), sim.action(from_pairs, ket), atol=1e-10)
+    assert np.allclose(sim.action(from_op, ket), sim.action(from_pairs, ket),
+                       atol=1e-10)
 
 
 def test_single_term_negative_coefficient_keeps_sign():
     # Zero-ancilla regression: -c * P must encode -c * P, not +c * P.
-    enc = lcu.PauliLCU({"XZ": -0.5})
+    enc = PauliLCU({"XZ": -0.5})
     assert enc.num_ancilla == 0
 
     ket = random_ket(2, seed=3)
@@ -99,13 +85,13 @@ def test_single_term_negative_coefficient_keeps_sign():
 
 
 def test_identity_term_handling():
-    enc = lcu.PauliLCU({"II": 0.2, "XI": 0.5, "ZI": 0.3})
+    enc = PauliLCU({"II": 0.2, "XI": 0.5, "ZI": 0.3})
     assert enc.constant_term == pytest.approx(0.2)
     assert enc.num_terms == 3
     assert enc.alpha == pytest.approx(1.0)
 
-    excluded = lcu.PauliLCU({"II": 0.2, "XI": 0.5, "ZI": 0.3},
-                            include_identity=False)
+    excluded = PauliLCU({"II": 0.2, "XI": 0.5, "ZI": 0.3},
+                        include_identity=False)
     assert excluded.constant_term == pytest.approx(0.2)
     assert excluded.num_terms == 2
     assert excluded.alpha == pytest.approx(0.8)
@@ -114,7 +100,7 @@ def test_identity_term_handling():
 def test_walk_moments_match_chebyshev():
     # Asymmetric spectrum 0.2 +/- sqrt(0.34): the reflection expectation after
     # k walks must reproduce <T_2k(H/alpha)> with both eigenvalue weights.
-    enc = lcu.PauliLCU({"I": 0.2, "X": 0.5, "Z": 0.3})
+    enc = PauliLCU({"I": 0.2, "X": 0.5, "Z": 0.3})
     assert enc.num_ancilla == 2
 
     lam = math.sqrt(0.34)
@@ -127,8 +113,7 @@ def test_walk_moments_match_chebyshev():
     ket = np.array([math.cos(prep_angle / 2), math.sin(prep_angle / 2)],
                    dtype=np.complex128)
     for k in (1, 2, 3):
-        state = cudaq.get_state(enc.walk_kernel(power=k),
-                                lcu.state_from(ket))
+        state = cudaq.get_state(enc.walk_kernel(power=k), state_from(ket))
         zero_probability = float(
             np.sum(np.abs(sim.good_subspace(enc, state))**2))
         moment = 2.0 * zero_probability - 1.0
@@ -141,18 +126,18 @@ def test_walk_moments_match_chebyshev():
 
 def test_validation_errors():
     with pytest.raises(ValueError):
-        lcu.PauliLCU({})
+        PauliLCU({})
     with pytest.raises(ValueError):
-        lcu.PauliLCU({"XI": 0.5, "XII": 0.3})
+        PauliLCU({"XI": 0.5, "XII": 0.3})
     with pytest.raises(ValueError):
-        lcu.PauliLCU({"XQ": 0.5})
+        PauliLCU({"XQ": 0.5})
     with pytest.raises(ValueError):
-        lcu.PauliLCU({"XI": 0.5}, num_qubits=3)
+        PauliLCU({"XI": 0.5}, num_qubits=3)
     with pytest.raises(TypeError):
-        lcu.PauliLCU(42)
+        PauliLCU(42)
 
 
 def test_repr_reads_well():
-    text = repr(lcu.PauliLCU(FOUR_TERMS))
+    text = repr(PauliLCU(FOUR_TERMS))
     assert "terms=4" in text
     assert "ancilla_qubits=2" in text

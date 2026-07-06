@@ -6,7 +6,7 @@
 # This source code and the accompanying materials are made available under     #
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
-"""Quantum Exact Lanczos with the pure-Python PauliLCU + qubitization prototype.
+"""Quantum Exact Lanczos with the PauliLCU block encoding and qubitization.
 
 Measures Chebyshev moments <T_k(H/alpha)> with the QEL even/odd observable
 convention (Walk.moments), builds the Krylov overlap/Hamiltonian matrices
@@ -26,8 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import cudaq
 
-import pauli_lcu_py as lcu
-import qubitization_py as qub
+import cudaq_algorithms  # noqa: F401 — registers cudaq.algorithms
+from cudaq.algorithms import PauliLCU, Walk
 
 HAMILTONIAN = {
     "ZI": 0.70,
@@ -71,18 +71,18 @@ def solve_filtered(hamiltonian, overlap, cutoff):
 
 
 def dense_ground_energy(terms, constant, num_qubits):
-    from test_pauli_lcu_py import dense_matrix
+    from test_pauli_lcu import dense_matrix
 
     matrix = dense_matrix([(c, w) for w, c in terms.items()], num_qubits)
     return float(np.linalg.eigvalsh(matrix).min()) + constant
 
 
 def main():
-    cudaq.set_target(os.environ.get("LCU_PY_TARGET", "qpp-cpu"))
+    cudaq.set_target(os.environ.get("CUDAQ_DEFAULT_SIMULATOR", "qpp-cpu"))
 
-    # -- the entire quantum workflow -------------------------------------
-    encoding = lcu.PauliLCU(HAMILTONIAN)
-    walk = qub.Walk(encoding)
+    # -- quantum workflow -------------------------------------------------
+    encoding = PauliLCU(HAMILTONIAN)
+    walk = Walk(encoding)
 
     reference_state = np.zeros(1 << encoding.num_system, dtype=np.complex128)
     reference_state[1] = 1.0  # Hartree-Fock-style basis state
