@@ -5,13 +5,14 @@
 # This source code and the accompanying materials are made available under     #
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
-"""Simulation-only helpers for the tests, demo, and examples.
+"""Simulation-only helpers.
 
 Everything here depends on statevector access (``cudaq.get_state`` /
-postselection slicing), which only exists on simulators. These helpers are
-deliberately outside the library package: the library surface (encodings,
-kernel factories, observables, ``Walk.moment`` via ``cudaq.observe``) is
-hardware-shaped, and nothing in it executes ``get_state``.
+postselection slicing), which only exists on simulators. The module ships
+with the package as a clearly-labeled companion, but it is not part of the
+hardware-shaped API: the library classes (encodings, kernel factories,
+observables, ``Walk.moment`` via ``cudaq.observe``) never execute
+``get_state``.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from __future__ import annotations
 import cudaq
 
 # Re-exported: precision-aware initial-state construction.
-from cudaq_algorithms import state_from
+from .pauli_lcu import state_from
 
 __all__ = ["state_from", "good_subspace", "action", "transform"]
 

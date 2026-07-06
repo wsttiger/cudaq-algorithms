@@ -18,7 +18,7 @@ import sys as _sys
 
 import cudaq as _cudaq
 
-from . import pauli_lcu, qsvt, qubitization
+from . import pauli_lcu, qsvt, qubitization, sim_utils
 from .pauli_lcu import (PauliLCU, apply, controlled_select, prepare,
                         reflect_about_zero, select, state_from, unprepare,
                         walk)
@@ -60,6 +60,7 @@ __all__ = [
     "select",
     "select_observable",
     "signal_phase",
+    "sim_utils",
     "state_from",
     "unprepare",
     "walk",
@@ -70,4 +71,5 @@ _sys.modules["cudaq.algorithms"] = _sys.modules[__name__]
 _sys.modules["cudaq.algorithms.pauli_lcu"] = pauli_lcu
 _sys.modules["cudaq.algorithms.qubitization"] = qubitization
 _sys.modules["cudaq.algorithms.qsvt"] = qsvt
+_sys.modules["cudaq.algorithms.sim_utils"] = sim_utils
 _cudaq.algorithms = _sys.modules[__name__]

@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cudaq
 
 import cudaq_algorithms  # noqa: F401 — registers cudaq.algorithms
-import sim_utils as sim
+from cudaq_algorithms import sim_utils as sim
 from cudaq.algorithms import (PauliLCU, PhaseSequence, QSVT,
                               recover_real_time_evolution)
 
