@@ -16,7 +16,7 @@ import cudaq
 from cudaq import spin
 
 import cudaq_algorithms  # noqa: F401 — registers cudaq.algorithms
-import sim_utils as sim
+from cudaq_algorithms import sim_utils as sim
 from cudaq.algorithms import PauliLCU, state_from
 
 

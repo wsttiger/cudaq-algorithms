@@ -15,7 +15,7 @@ import pytest
 import cudaq
 
 import cudaq_algorithms  # noqa: F401 — registers cudaq.algorithms
-import sim_utils as sim
+from cudaq_algorithms import sim_utils as sim
 from cudaq.algorithms import (ADJOINT, FORWARD, PauliLCU, PhaseSequence, QSVT,
                               recover_real_time_evolution, state_from)
 from test_pauli_lcu import dense_matrix, random_ket
