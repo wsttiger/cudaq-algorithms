@@ -56,6 +56,16 @@ STEPS = 4
 ORDER = 2
 
 
+@cudaq.kernel
+def prepare_state(q: cudaq.qview):
+    """Small product-state superposition so non-commuting terms have
+    visible effect in the output amplitudes."""
+    ry(0.31, q[0])
+    rx(-0.27, q[1])
+    ry(0.19, q[2])
+    rx(0.23, q[3])
+
+
 def pauli_matrix(word):
     dim = 2**len(word)
     matrix = np.zeros((dim, dim), dtype=np.complex128)
@@ -101,15 +111,10 @@ def main():
         ordering=trotter.TrotterOrdering.COEFFICIENT_MAGNITUDE_DESCENDING)
     resources = plan.resources()
 
-    # Initial state: a small product-state superposition so non-commuting
-    # terms have visible effect.
     @cudaq.kernel
     def prepare_only():
         q = cudaq.qvector(4)
-        ry(0.31, q[0])
-        rx(-0.27, q[1])
-        ry(0.19, q[2])
-        rx(0.23, q[3])
+        prepare_state(q)
 
     ket0 = np.asarray(cudaq.get_state(prepare_only), dtype=np.complex128)
 
@@ -125,10 +130,7 @@ def main():
     def evolve_kernel(coeffs: list[float], paulis: list[cudaq.pauli_word],
                       t: float, n_steps: int, formula_order: int):
         q = cudaq.qvector(4)
-        ry(0.31, q[0])
-        rx(-0.27, q[1])
-        ry(0.19, q[2])
-        rx(0.23, q[3])
+        prepare_state(q)
         trotter.apply_trotter(coeffs, paulis, t, n_steps, formula_order, q)
 
     kernel_state = np.asarray(cudaq.get_state(evolve_kernel, coefficients,
