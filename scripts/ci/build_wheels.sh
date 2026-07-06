@@ -105,38 +105,26 @@ rm -rf dist _skbuild pyproject.toml
 cp "pyproject.toml.cu${cuda_major}" pyproject.toml
 
 # Stage the experimental pure-Python modules as a cudaq_algorithms.experimental
-# subpackage. The CMake `install(DIRECTORY cudaq_algorithms ...)` rule picks up
-# whatever is present in python/cudaq_algorithms at build time, so staging here
-# is sufficient. Only library modules ship: tests, examples, READMEs, and the
-# simulation-only sim_utils stay in experiments/.
+# subpackage. The prototype is already a relative-import package
+# (experiments/lcu_python/cudaq_algorithms), so its modules work unchanged as a
+# subpackage; its __init__ also registers the cudaq.algorithms namespace. The
+# Suzuki-Trotter module is appended as .trotter. Tests, examples, conftest,
+# READMEs, and the simulation-only sim_utils stay in experiments/.
 experimental_pkg=python/cudaq_algorithms/experimental
 rm -rf "$experimental_pkg"
 if [[ -d experiments ]]; then
     mkdir -p "$experimental_pkg"
-    cp experiments/lcu_python/pauli_lcu_py.py \
-       experiments/lcu_python/qubitization_py.py \
-       experiments/lcu_python/qsvt_py.py \
-       experiments/suzuki_trotter_python/trotter_py.py \
+    cp experiments/lcu_python/cudaq_algorithms/__init__.py \
+       experiments/lcu_python/cudaq_algorithms/pauli_lcu.py \
+       experiments/lcu_python/cudaq_algorithms/qsvt.py \
+       experiments/lcu_python/cudaq_algorithms/qubitization.py \
        "$experimental_pkg/"
-    cat > "$experimental_pkg/__init__.py" <<'PYEOF'
-"""Experimental pure-Python algorithm prototypes (unsupported, subject to
-change). The modules are written as flat top-level modules that import each
-other by name, so this package puts its own directory on sys.path before
-importing them."""
+    cp experiments/suzuki_trotter_python/trotter_py.py "$experimental_pkg/trotter.py"
+    cat >> "$experimental_pkg/__init__.py" <<'PYEOF'
 
-import os as _os
-import sys as _sys
-
-_here = _os.path.dirname(_os.path.abspath(__file__))
-if _here not in _sys.path:
-    _sys.path.insert(0, _here)
-
-import pauli_lcu_py as lcu
-import qubitization_py as qubitization
-import qsvt_py as qsvt
-import trotter_py as trotter
-
-__all__ = ["lcu", "qubitization", "qsvt", "trotter"]
+# Staged addition for the wheel build: the Suzuki-Trotter prototype.
+from . import trotter
+_sys.modules["cudaq.algorithms.trotter"] = trotter
 PYEOF
     trap 'rm -rf "$experimental_pkg"' EXIT
 fi
