@@ -108,8 +108,8 @@ cp "pyproject.toml.cu${cuda_major}" pyproject.toml
 # subpackage. The prototype is already a relative-import package
 # (experiments/lcu_python/cudaq_algorithms), so its modules work unchanged as a
 # subpackage; its __init__ also registers the cudaq.algorithms namespace. The
-# Suzuki-Trotter module is appended as .trotter. Tests, examples, conftest,
-# and READMEs stay in experiments/; sim_utils ships as part of the package.
+# Suzuki-Trotter module is appended as .trotter. Tests, conftest, and READMEs
+# stay in experiments/; sim_utils and the runnable examples ship in the wheel.
 experimental_pkg=python/cudaq_algorithms/experimental
 rm -rf "$experimental_pkg"
 if [[ -d experiments ]]; then
@@ -132,6 +132,22 @@ if [[ -d experiments ]]; then
 from . import trotter
 _sys.modules["cudaq.algorithms.trotter"] = trotter
 PYEOF
+    # Stage the runnable examples, rewriting the in-tree imports (local
+    # package on sys.path) to the installed-wheel form (experimental
+    # subpackage registering cudaq.algorithms).
+    mkdir -p "$experimental_pkg/examples"
+    touch "$experimental_pkg/examples/__init__.py"
+    sed -e '/^sys\.path\.insert/d' \
+        -e 's|^import cudaq_algorithms .*|import cudaq_algorithms.experimental  # noqa: F401 — registers cudaq.algorithms|' \
+        -e 's|^from cudaq_algorithms import sim_utils as sim$|from cudaq.algorithms import sim_utils as sim|' \
+        -e 's|PYTHONPATH=/path/to/cudaq python3 example_hamiltonian_simulation.py|python3 -m cudaq_algorithms.experimental.examples.example_hamiltonian_simulation|' \
+        experiments/lcu_python/example_hamiltonian_simulation.py \
+        > "$experimental_pkg/examples/example_hamiltonian_simulation.py"
+    sed -e '/^sys\.path\.insert/d' \
+        -e 's|^from cudaq_algorithms import sim_utils, trotter$|import cudaq_algorithms.experimental  # noqa: F401 — registers cudaq.algorithms\nfrom cudaq.algorithms import sim_utils, trotter|' \
+        -e 's|PYTHONPATH=/path/to/cudaq python3 example_trotter_chemistry.py|python3 -m cudaq_algorithms.experimental.examples.example_trotter_chemistry|' \
+        experiments/suzuki_trotter_python/example_trotter_chemistry.py \
+        > "$experimental_pkg/examples/example_trotter_chemistry.py"
     trap 'rm -rf "$experimental_pkg"' EXIT
 fi
 
