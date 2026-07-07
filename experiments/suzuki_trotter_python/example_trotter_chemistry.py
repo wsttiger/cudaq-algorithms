@@ -6,16 +6,15 @@
 # This source code and the accompanying materials are made available under     #
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
-"""Suzuki-Trotter simulation of a chemistry-style Hamiltonian (pure Python).
+"""Suzuki-Trotter simulation of a chemistry-style Hamiltonian.
 
-Port of examples/hamiltonian_simulation/trotter_chemistry.py from the
-add_suzuki_trotter branch. The Hamiltonian is hard-coded as Pauli terms to
-keep the example focused on the algorithm primitives.
+The Hamiltonian is hard-coded as Pauli terms to keep the example focused
+on the algorithm primitives. Two ways to run the same evolution are shown:
 
-Two ways to run the same evolution are shown:
-1. plan.evolve(ket) — one call, identity phase included.
-2. A user kernel composing trotter_py.apply_trotter with state preparation
-   (the escape hatch; this is the hardware-shaped path).
+1. ``sim_utils.evolve(plan, ket)`` — one call, identity phase included
+   (simulation helper).
+2. A user kernel composing ``trotter.apply_trotter`` with state
+   preparation — the hardware-shaped composition path.
 
 Run with:  PYTHONPATH=/path/to/cudaq python3 example_trotter_chemistry.py
 """
@@ -30,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import cudaq
 
-import trotter_py as trotter
+from cudaq_algorithms import sim_utils, trotter
 
 # A four-qubit molecular-style Pauli Hamiltonian. In a production chemistry
 # workflow these terms would come from a fermion-to-qubit mapping.
@@ -101,7 +100,7 @@ def exact_evolve(plan, ket):
 
 
 def main():
-    cudaq.set_target(os.environ.get("LCU_PY_TARGET", "qpp-cpu"))
+    cudaq.set_target(os.environ.get("CUDAQ_DEFAULT_SIMULATOR", "qpp-cpu"))
 
     plan = trotter.make_trotter_plan(
         HAMILTONIAN,
@@ -118,8 +117,8 @@ def main():
 
     ket0 = np.asarray(cudaq.get_state(prepare_only), dtype=np.complex128)
 
-    # Path 1: the one-call convenience (identity phase included).
-    evolved = plan.evolve(ket0)
+    # Path 1: the one-call simulation helper (identity phase included).
+    evolved = sim_utils.evolve(plan, ket0)
     exact = exact_evolve(plan, ket0)
     direct_error = float(np.linalg.norm(evolved - exact))
 
@@ -141,7 +140,7 @@ def main():
         -1.0j * plan.identity_coefficient * TIME)
     paths_agree = float(np.linalg.norm(kernel_state - evolved))
 
-    print("Suzuki-Trotter chemistry-style example (pure-Python prototype)")
+    print("Suzuki-Trotter chemistry-style example")
     print("=" * 62)
     print(f"num_qubits:           {plan.num_qubits}")
     print(f"num_terms:            {resources.num_terms}")

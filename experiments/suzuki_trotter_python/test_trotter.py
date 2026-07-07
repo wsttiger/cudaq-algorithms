@@ -5,39 +5,24 @@
 # This source code and the accompanying materials are made available under     #
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
-"""Tests for the pure-Python Suzuki-Trotter prototype.
+"""Tests for the Suzuki-Trotter module.
 
-Mirrors tests/python/test_trotter.py from the add_suzuki_trotter branch,
-adapted to the pure-Python module, plus coverage for the prototype-only
-surface (dict/pairs inputs, plan.kernel(), plan.evolve()).
+Product-formula correctness is pinned against independent dense references
+(matrix exponentials and an explicit Pauli-rotation simulator), and the
+host-side extraction, planning, and resource machinery is covered for
+every accepted input form.
 """
-
-import os
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
 import cudaq
 from cudaq import spin
 
-import trotter_py as trotter
+from cudaq_algorithms import sim_utils, trotter
 
 FOREST_RUTH_W1 = 1.3512071919596578
 FOREST_RUTH_W0 = -1.7024143839193153
-
-# Override with e.g. LCU_PY_TARGET=nvidia-fp64 to run on a GPU simulator.
-SIMULATION_TARGET = os.environ.get("LCU_PY_TARGET", "qpp-cpu")
-
-
-@pytest.fixture(autouse=True)
-def simulation_target():
-    cudaq.set_target(SIMULATION_TARGET)
-    yield
-    cudaq.reset_target()
 
 
 # ----------------------------------------------------------------------------
@@ -478,28 +463,25 @@ def test_apply_trotter_kernel_handles_four_qubit_hamiltonian_with_many_terms():
 
 
 # ----------------------------------------------------------------------------
-# Prototype-only surface: plan.kernel() and plan.evolve()
+# Plan kernel factory and simulation-helper evolution
 # ----------------------------------------------------------------------------
 
 
-def test_plan_kernel_factory_matches_escape_hatch():
+def test_plan_kernel_factory_evolves_the_zero_state():
     hamiltonian = {"XI": 0.7, "IZ": 0.4, "XZ": 0.31, "YY": 0.23}
     plan = trotter.make_trotter_plan(hamiltonian, time=0.8, steps=3, order=2)
 
-    rng = np.random.default_rng(11)
-    ket = rng.normal(size=4) + 1.0j * rng.normal(size=4)
-    ket = (ket / np.linalg.norm(ket)).astype(np.complex128)
-
-    factory_state = np.asarray(cudaq.get_state(plan.kernel(),
-                                               trotter.state_from(ket)),
+    ket0 = np.zeros(4, dtype=np.complex128)
+    ket0[0] = 1.0
+    factory_state = np.asarray(cudaq.get_state(plan.kernel()),
                                dtype=np.complex128)
     expected = _simulate_trotter(plan.coefficients, plan.words, 0.0,
                                  plan.num_qubits, plan.time, plan.steps,
-                                 plan.order, ket)
+                                 plan.order, ket0)
     np.testing.assert_allclose(factory_state, expected, atol=1e-6)
 
 
-def test_plan_evolve_includes_identity_phase():
+def test_sim_utils_evolve_includes_identity_phase():
     hamiltonian = {"XI": 0.7, "IZ": 0.4, "II": -0.2}
     plan = trotter.make_trotter_plan(hamiltonian, time=0.8, steps=64, order=2)
 
@@ -509,12 +491,12 @@ def test_plan_evolve_includes_identity_phase():
 
     exact = _exact_evolve(plan.coefficients, plan.words,
                           plan.identity_coefficient, plan.time, ket)
-    evolved = plan.evolve(ket)
+    evolved = sim_utils.evolve(plan, ket)
     # Direct comparison, NOT phase-aligned: evolve() reintroduces the
     # identity phase the circuit primitive omits.
     assert np.linalg.norm(evolved - exact) < 1e-3
 
-    without_phase = plan.evolve(ket, include_identity_phase=False)
+    without_phase = sim_utils.evolve(plan, ket, include_identity_phase=False)
     assert np.linalg.norm(without_phase - exact) > 0.1
 
 
@@ -523,10 +505,89 @@ def test_identity_only_plan_is_a_global_phase():
     assert plan.num_terms == 0
 
     ket = np.array([0.5, 0.5, 0.5, 0.5], dtype=np.complex128)
-    evolved = plan.evolve(ket)
+    evolved = sim_utils.evolve(plan, ket)
     np.testing.assert_allclose(evolved,
                                np.exp(0.1j) * ket,
                                atol=1e-12)
-    np.testing.assert_allclose(plan.evolve(ket, include_identity_phase=False),
+    np.testing.assert_allclose(sim_utils.evolve(plan, ket,
+                                                include_identity_phase=False),
                                ket,
                                atol=1e-12)
+
+
+# ----------------------------------------------------------------------------
+# _word_pairs_from_input: every accepted input form and every rejection
+# ----------------------------------------------------------------------------
+
+
+def test_word_pairs_from_mapping():
+    pairs, width = trotter._word_pairs_from_input(
+        {"XI": 0.7, "IZ": 0.4, "II": -0.2}, 1e-12)
+    assert width == 2
+    assert pairs == [(0.7, "XI"), (0.4, "IZ"), (-0.2, "II")]
+
+
+def test_word_pairs_from_pair_iterable():
+    pairs, width = trotter._word_pairs_from_input(
+        [(0.7, "XI"), (0.4, "IZ")], 1e-12)
+    assert width == 2
+    assert pairs == [(0.7, "XI"), (0.4, "IZ")]
+
+    # Tuples and generators normalize identically.
+    pairs_gen, width_gen = trotter._word_pairs_from_input(
+        ((c, w) for c, w in [(0.7, "XI"), (0.4, "IZ")]), 1e-12)
+    assert (pairs_gen, width_gen) == (pairs, width)
+
+
+def test_word_pairs_from_spin_operator():
+    hamiltonian = (0.7 * spin.x(0) + 0.4 * spin.z(1) -
+                   0.2 * cudaq.SpinOperator.from_word("II"))
+    pairs, width = trotter._word_pairs_from_input(hamiltonian, 1e-12)
+    assert width == 2
+    assert {word: coeff for coeff, word in pairs} == pytest.approx({
+        "XI": 0.7,
+        "IZ": 0.4,
+        "II": -0.2,
+    })
+
+
+def test_word_pairs_from_single_spin_term():
+    # An elementary product is not a full SpinOperator; it must be
+    # canonicalized to the same (coefficient, padded word) form.
+    pairs, width = trotter._word_pairs_from_input(0.5 * spin.y(2), 1e-12)
+    assert width == 3
+    assert pairs == [(0.5, "IIY")]
+
+
+def test_word_pairs_padding_uses_widest_term():
+    # A spin operator whose terms touch different qubit counts pads every
+    # word to the widest extent.
+    hamiltonian = 0.3 * spin.x(0) + 0.2 * spin.z(3)
+    pairs, width = trotter._word_pairs_from_input(hamiltonian, 1e-12)
+    assert width == 4
+    assert sorted(word for _, word in pairs) == ["IIIZ", "XIII"]
+
+
+def test_word_pairs_accepts_complex_within_tolerance():
+    pairs, _ = trotter._word_pairs_from_input({"X": 0.5 + 1e-14j}, 1e-12)
+    assert pairs == [(0.5, "X")]
+
+
+def test_word_pairs_rejections():
+    with pytest.raises(ValueError, match="real"):
+        trotter._word_pairs_from_input({"X": 0.5 + 0.3j}, 1e-12)
+    with pytest.raises(ValueError, match="real"):
+        trotter._word_pairs_from_input([(0.5j, "X")], 1e-12)
+    with pytest.raises(ValueError, match="real"):
+        trotter._word_pairs_from_input(0.5j * spin.x(0), 1e-12)
+    with pytest.raises(ValueError, match="same length"):
+        trotter._word_pairs_from_input({"XI": 0.5, "X": 0.3}, 1e-12)
+    with pytest.raises(ValueError, match="unsupported Pauli"):
+        trotter._word_pairs_from_input({"XQ": 0.5}, 1e-12)
+    with pytest.raises(TypeError):
+        trotter._word_pairs_from_input(42, 1e-12)
+
+
+def test_word_pairs_empty_mapping():
+    pairs, width = trotter._word_pairs_from_input({}, 1e-12)
+    assert pairs == [] and width == 0

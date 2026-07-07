@@ -1,15 +1,17 @@
-# Pure-Python Suzuki-Trotter — API-surface experiment
+# Suzuki-Trotter Hamiltonian simulation (pure Python)
 
-A self-contained, Python-only replication of the `add_suzuki_trotter` branch:
-term extraction, planning/ordering, resource estimation, and the
-product-formula circuit itself, with no compiled `cudaq-algorithms` bindings —
-only `cudaq` and `numpy`. Companion to the `experiments/lcu_python` prototype
-on the `expt_lcu_python` branch (same philosophy, same conventions).
+Product-formula time evolution for Hamiltonians expressed as sums of Pauli
+strings, implemented entirely in Python on top of CUDA-Q: term extraction,
+host-side planning and ordering, resource estimation, and the circuit
+primitive itself. Importing the package registers it under the
+`cudaq.algorithms` namespace.
 
 ```
-trotter_py.py                  the module: kernel + terms + plan + resources
-test_trotter_py.py             ports every test from tests/python/test_trotter.py
-example_trotter_chemistry.py   port of examples/hamiltonian_simulation/trotter_chemistry.py
+cudaq_algorithms/trotter.py     term extraction, plans, resources, apply_trotter kernel
+cudaq_algorithms/sim_utils.py   simulation-only helpers (statevector evolution)
+conftest.py                     shared pytest configuration
+test_trotter.py                 dense-reference test suite
+example_trotter_chemistry.py    chemistry-style end-to-end example
 ```
 
 Run:
@@ -19,69 +21,82 @@ PYTHONPATH=/path/to/cudaq python3 -m pytest -q .
 PYTHONPATH=/path/to/cudaq python3 example_trotter_chemistry.py
 ```
 
-The simulation target defaults to `qpp-cpu`; override with `LCU_PY_TARGET`
-(e.g. `nvidia-fp64`). Initial-state construction goes through `state_from`,
-which matches the input dtype to the active target's precision.
+The simulation target defaults to `qpp-cpu`; override with CUDA-Q's
+standard `CUDAQ_DEFAULT_SIMULATOR` variable (e.g. `nvidia-fp64` for the
+GPU statevector simulator).
 
-## Functionality parity with the C++/bindings branch
-
-| add_suzuki_trotter | here |
-|---|---|
-| `apply_trotter` device kernel (orders 1, 2, 4; invalid inputs no-op) | `trotter_py.apply_trotter`, identical signature |
-| `make_trotter_terms` (identity split out, imaginary rejection, padding) | ✅ |
-| `make_trotter_plan` / `TrotterPlan` / `TrotterOrdering` | ✅ same fields + validation |
-| `estimate_trotter_resources` (plan or flattened) | ✅ same formulas |
-| Python test suite (14 tests: interop, no-ops, order thresholds, slope fit, commuting exactness, 4-qubit) | all ported |
-| `trotter_chemistry.py` example | ported |
-
-Prototype-style ergonomics on top:
+## API
 
 ```python
-import trotter_py as trotter
+import cudaq_algorithms                     # registers cudaq.algorithms
+from cudaq.algorithms import trotter
 
+# Flexible Hamiltonian input: SpinOperator, single spin term,
+# {"XZI...": coeff} mapping, or (coeff, word) pairs.
 plan = trotter.make_trotter_plan(
-    {"XI": 0.7, "IZ": 0.4, "II": -0.2},   # dict / SpinOperator / (coeff, word) pairs
-    time=0.8, steps=4, order=2,
+    hamiltonian, time=0.8, steps=4, order=2,
     ordering=trotter.TrotterOrdering.COEFFICIENT_MAGNITUDE_DESCENDING)
 
-plan.kernel()       # ready @cudaq.kernel(state) — no argument threading
-plan.evolve(psi)    # one-call simulation, identity phase INCLUDED by default
-plan.resources()    # TrotterResourceEstimate
+plan.kernel()       # ready @cudaq.kernel(): |0...0> -> evolved state
+plan.resources()    # TrotterResourceEstimate (rotations, CNOT proxy, ...)
+plan.num_terms, plan.identity_coefficient, plan.words, plan.coefficients
 ```
 
-`plan.evolve` can do something the circuit primitive cannot: reintroduce the
-identity phase `exp(-i * identity_coefficient * t)` host-side, so its output
-approximates the full `exp(-i H t)|psi>` and comparisons against exact
-evolution need no phase alignment.
+Supported product-formula orders: 1 (first order), 2 (symmetric second
+order), and 4 (Forest-Ruth, built from symmetric steps with time fractions
+`FOREST_RUTH_W1`, `FOREST_RUTH_W0`, `FOREST_RUTH_W1`).
 
-Design choice: flattened `words` are plain **strings** host-side (readable,
-comparable, and accepted directly as `list[cudaq.pauli_word]` kernel
-arguments); `plan.kernel()` converts to `cudaq.pauli_word` only for capture,
-where plain strings cannot be lowered.
+For composition inside a custom kernel, the flattened primitive is the
+escape hatch:
 
-## Kernel-language findings (new in this experiment)
+```python
+@cudaq.kernel
+def my_kernel(coeffs: list[float], words: list[cudaq.pauli_word],
+              t: float, steps: int, order: int):
+    q = cudaq.qvector(4)
+    # ... state preparation ...
+    trotter.apply_trotter(coeffs, words, t, steps, order, q)
+```
 
-1. **`return` inside a Python `@cudaq.kernel` is silently ignored** — gates
-   after an `if cond: return` execute regardless of the condition. This is
-   the most serious AST-bridge finding so far: the C++-mirroring early-return
-   guards compiled and *appeared* to work because zero-trip loops masked
-   them, until the unsupported-order guard produced a wrong circuit instead
-   of a no-op. `apply_trotter`'s body is one positively-guarded if-block as a
-   result. (The `if n == 0: return` guards in the `lcu_python` prototype
-   kernels are the same latent hazard — unreachable there only because the
-   factories special-case those paths.)
-2. `exp_pauli` works in Python kernels with `pauli_word` lists as arguments
-   and as factory captures; plain strings work as arguments but cannot be
-   *captured* ("Cannot handle conversion of python type <class 'str'>").
-3. `cudaq.pauli_word` is opaque in Python (`str()` returns the repr), while
-   `SpinOperatorTerm.get_pauli_word()` returns a plain `str` — hence the
-   strings-host-side design choice.
+### Identity terms
 
-## Deliberate scope cuts (matching the upstream branch)
+For `H = c I + H'`, the circuit applies the product formula for `H'` only;
+`exp(-i c t)` cannot be realized as a circuit on the evolved register. The
+phase is an unobservable global phase for a single unconditioned evolution
+but a real relative phase for controlled or interference-based algorithms —
+`plan.identity_coefficient` reports it so callers can account for it.
 
-- No controlled Trotter evolution — the upstream docs list it as future work
-  (needed for phase estimation, Hadamard tests, Krylov moments). The
-  combined-register pattern from the LCU prototype's controlled family would
-  extend here directly.
-- Phase/ordering optimizations beyond coefficient-magnitude sorting are out
-  of scope, as upstream.
+### Simulation helpers (`sim_utils`)
+
+Statevector-based conveniences live in `cudaq.algorithms.sim_utils`,
+clearly separated from the hardware-shaped API (nothing in the library
+classes calls `cudaq.get_state`):
+
+```python
+from cudaq.algorithms import sim_utils
+
+evolved = sim_utils.evolve(plan, ket)   # approximates exp(-i H t)|ket>,
+                                        # identity phase included
+```
+
+## Testing
+
+The suite pins correctness against independent dense references: exact
+matrix exponentials via diagonalization, and an explicit Pauli-rotation
+simulator for per-order product formulas. Coverage includes kernel
+interop with flattened arguments, invalid-input no-op behavior, per-order
+error thresholds, asymptotic error-scaling slope fits (order-p error ~
+dt^p), exactness for commuting Hamiltonians, and every accepted input
+form of the term-extraction front end.
+
+## Known CUDA-Q Python constraints
+
+Two upstream compiler behaviors shape the implementation:
+
+- `return` inside a Python kernel is silently ignored
+  ([cuda-quantum#4845](https://github.com/NVIDIA/cuda-quantum/issues/4845));
+  the `apply_trotter` body is a single positively-guarded block instead of
+  early-return guards.
+- Captured empty lists cannot be marshaled
+  ([cuda-quantum#4847](https://github.com/NVIDIA/cuda-quantum/issues/4847));
+  identity-only plans special-case their kernel factory.
