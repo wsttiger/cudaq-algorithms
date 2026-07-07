@@ -115,10 +115,20 @@ rm -rf "$experimental_pkg"
 if [[ -d experiments ]]; then
     mkdir -p "$experimental_pkg"
     cp experiments/lcu_python/cudaq_algorithms/*.py "$experimental_pkg/"
-    cp experiments/suzuki_trotter_python/trotter_py.py "$experimental_pkg/trotter.py"
+    cp experiments/suzuki_trotter_python/cudaq_algorithms/trotter.py \
+       "$experimental_pkg/trotter.py"
+    # Merge the Trotter simulation helper into the staged sim_utils (both
+    # experiments ship a sim_utils module; the wheel carries one).
+    {
+        echo ""
+        sed -n '/^def evolve/,$p' \
+            experiments/suzuki_trotter_python/cudaq_algorithms/sim_utils.py
+        echo ""
+        echo '__all__ = list(__all__) + ["evolve"]'
+    } >> "$experimental_pkg/sim_utils.py"
     cat >> "$experimental_pkg/__init__.py" <<'PYEOF'
 
-# Staged addition for the wheel build: the Suzuki-Trotter prototype.
+# Staged addition for the wheel build: the Suzuki-Trotter module.
 from . import trotter
 _sys.modules["cudaq.algorithms.trotter"] = trotter
 PYEOF
