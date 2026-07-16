@@ -26,7 +26,9 @@ Verify: `np.asarray(cudaq.spin.z(0).to_matrix())` on 1 qubit is
 ## Pauli words
 
 Pauli words are strings over `IXYZ` with position = qubit index
-(`word[0]` acts on qubit 0). Extract canonical term dictionaries with
+(`word[0]` acts on qubit 0), so `"ZI"` means `Z` on qubit 0 — reversed
+relative to most papers' left-to-right tensor-product notation. Always
+translate at the boundary. Extract canonical term dictionaries with
 `term.get_pauli_word(width)` / `term.evaluate_coefficient()`, passing
 the intended qubit count as `width` so identity padding is explicit.
 
@@ -99,8 +101,12 @@ np.testing.assert_allclose(out[:2**enc.num_system],
 
 ## Qubitization walk
 
-- One walk step `W` block-encodes **`-H/alpha`** (the sign is folded
-  into the reflection); consumers rely on this.
+- One walk step `W = R U_A` (encoding, then reflection `R = I - 2|0><0|`)
+  block-encodes **`-H/alpha`**; its eigenphases are
+  `pi -/+ arccos(lambda/alpha)`. Much of the literature (e.g. Low-Chuang)
+  uses the opposite reflection sign or the other operator order and quotes
+  `+H/alpha` with eigenphases `+/- arccos(lambda/alpha)` — translate before
+  comparing. Consumers of this library rely on the `-H/alpha` form.
 - `walk_kernel(power)` / `Walk` powers apply Chebyshev polynomials:
   the good-subspace block after `p` steps is `T_p(-H/alpha)`.
 - `Walk.moment(ket, k)` returns `<T_k(H/alpha)>` (the sign convention
@@ -114,7 +120,20 @@ built by `QSVT.kernel` is implemented as `reference_response` in
 specification. A forward step is `reflect_about_zero` then the block
 encoding; `qsp`-convention sequences run doubled projector phases and
 differ from the model by `exp(i * sum(phases))`
-(`recover_real_time_evolution` accounts for it).
+(`recover_real_time_evolution` accounts for it). One more
+literature trap: QSPPACK's native `W_x` rotation has *imaginary*
+off-diagonals, while the circuit's response step is real — the bridge
+lives in the phase-generation options, and `reference_response` is the
+executable arbiter whenever they seem to disagree.
+
+## Reflection *gate* vs reflection *observable*
+
+Same word, opposite sign — a standard source of off-by-a-sign bugs:
+
+- the **gate** `common_kernels.reflect_about_zero` is `I - 2|0..0><0..0|`
+  (the all-zero state acquires `-1`);
+- the **observable** `qubitization.reflection_observable` is
+  `2|0..0><0..0| - I` (expectation `+1` on the all-zero state).
 
 ## Simulation targets and tolerances
 
