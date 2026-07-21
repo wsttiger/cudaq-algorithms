@@ -12,7 +12,10 @@ requires-python = ">=3.11"
 readme = "README.md"
 license = "Apache-2.0"
 dependencies = [
-  "cuda-quantum-cu13 == 0.14.*",
+  # The cudaq runtime ships Linux-only wheels; gate it so the pure
+  # algorithms wheel still resolves on other platforms (classical
+  # modules work there, circuit modules raise at point of use).
+  "cuda-quantum-cu13 == 0.14.*; sys_platform == 'linux'",
   "numpy",
   "scipy",
 ]
