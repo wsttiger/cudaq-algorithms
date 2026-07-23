@@ -12,12 +12,15 @@ requires-python = ">=3.11"
 readme = "README.md"
 license = "Apache-2.0"
 dependencies = [
-  # The cudaq runtime ships Linux-only wheels; gate it so the pure
-  # algorithms wheel still resolves on other platforms (classical
-  # modules work there, circuit modules raise at point of use).
+  # CUDA-Q runtime (cu13). Ships wheels for Linux and macOS (Apple
+  # Silicon); Windows has no CUDA-Q wheel, so it resolves without the
+  # runtime (classical modules work; circuit modules raise at point of use).
   "cuda-quantum-cu13 == 0.14.*; sys_platform == 'linux'",
+  "cuda-quantum-cu13 == 0.14.*; sys_platform == 'darwin'",
   "numpy",
   "scipy",
+  # Phase-factor generation for the QSVT examples (pure Python, on PyPI).
+  "qsppack >= 0.3.10",
 ]
 
 [tool.setuptools]
