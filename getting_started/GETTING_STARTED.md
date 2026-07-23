@@ -80,7 +80,7 @@ against a dense matrix.
 | 1 | `01_quickstart_block_encoding.py` | `PauliLCU` + `Walk`; moments as the observable path; verify-against-dense |
 | 2 | `02_hamiltonian_simulation.py` | `exp(-iHt)` two ways — QSVT (phase sequences) and Trotter (product formulas) — cross-checked |
 | 3 | `03_chemistry_to_ground_state.py` | molecule → `qubit_hamiltonian` → walk moments → quantum exact Lanczos vs FCI |
-| 4 | `04_double_factorization_and_the_protocol.py` | DF compression as a cost dial; `PauliLCU` and `DoubleFactorizedEncoding` under one protocol |
+| 4 | `04_double_factorization_and_the_protocol.py` | DF compression dial (H2) and compact encoding at scale (N2, 20q); `PauliLCU` and `DoubleFactorizedEncoding` under one protocol |
 | 5 | `05_state_prep_and_injection.py` | `state_prep=` injection → zero-argument synthesizable circuits; Givens Slater determinants |
 | 6 | `06_bring_your_own_encoding.py` | implement `BlockEncoding` from scratch; watch `Walk` work on it unchanged |
 

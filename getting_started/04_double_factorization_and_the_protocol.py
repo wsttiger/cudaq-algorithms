@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """Example 4 — Double factorization and the BlockEncoding protocol.
 
-Two ideas that reinforce each other:
+Three ideas, built on real molecules from PySCF:
 
-  A. The compression dial. Double factorization rewrites the two-electron
-     tensor as a sum of low-rank "leaves". Keep fewer leaves and the
-     block-encoding normalization `alpha` drops -- and since QSVT degree
-     scales like alpha * t, a smaller alpha means fewer walk steps for the
-     same simulated time. Compression is a resource knob you can see.
+  A. The compression dial (H2). Double factorization rewrites the
+     two-electron tensor as a sum of low-rank "leaves". Keep fewer leaves
+     and you trade accuracy for a cheaper block encoding -- a knob you can
+     watch, checked against the exact FCI energy at every setting.
 
-  B. Polymorphism through the protocol. `PauliLCU` and
+  B. It scales, and DF is compact (N2, 20 qubits). The same pipeline runs
+     at 20 qubits. There, a flat Pauli LCU block-encodes the Hamiltonian
+     as a SELECT over ~3000 Pauli strings; double factorization encodes
+     the *same* operator with a few dozen structured leaves. Far fewer
+     building blocks, comparable normalization.
+
+  C. Polymorphism through the protocol. `PauliLCU` and
      `DoubleFactorizedEncoding` are unrelated classes, but both satisfy
-     the `BlockEncoding` protocol -- so `Walk` and `QSVT` consume either
-     one with identical code. Bring an encoding, inherit the primitives.
+     `BlockEncoding` -- so `Walk` and `QSVT` consume either with identical
+     code.
 
-H2/STO-3G integrals are hardcoded, so no PySCF is needed.
-Run: python3 04_double_factorization_and_the_protocol.py
+Prerequisite: PySCF (`pip install pyscf`). Takes a few seconds (the N2
+FCI reference is the slow part). Run: python3 04_double_factorization_and_the_protocol.py
 """
 
 from __future__ import annotations
@@ -23,66 +28,94 @@ from __future__ import annotations
 import os
 
 import cudaq
-import numpy as np
 
 from cudaq_algorithms import (BlockEncoding, DoubleFactorizedEncoding,
                               PauliLCU, QSVT, Walk, chemistry)
 from cudaq_algorithms import double_factorization as df
 
-# H2 / STO-3G MO integrals (chemist (pq|rs) convention).
-ONE_BODY = np.array([[-1.25246357, 0.0], [0.0, -0.47594871]])
-ERI = np.zeros((2, 2, 2, 2))
-ERI[0, 0, 0, 0] = 0.67449876
-ERI[1, 1, 1, 1] = 0.69716349
-ERI[0, 0, 1, 1] = ERI[1, 1, 0, 0] = 0.66347258
-ERI[0, 1, 0, 1] = ERI[1, 0, 1, 0] = 0.18128881
-ERI[0, 1, 1, 0] = ERI[1, 0, 0, 1] = 0.18128881
-E_NUCLEAR = 0.71375697
+
+def mean_field(atom: str, basis: str = "sto-3g"):
+    from pyscf import gto, scf
+
+    mol = gto.M(atom=atom, basis=basis, symmetry=False)
+    return mol, scf.RHF(mol).run(verbose=0)
 
 
-def ground_energy(operator) -> float:
-    return float(np.min(np.linalg.eigvalsh(np.asarray(operator.to_matrix()))))
+def fci_energy(one_body, eri, num_electrons, nuclear_repulsion) -> float:
+    """Exact (FCI) total energy of the given MO integrals, via PySCF."""
+    from pyscf import fci
+
+    electronic, _ = fci.direct_spin1.kernel(one_body, eri, one_body.shape[0],
+                                            num_electrons)
+    return float(electronic) + nuclear_repulsion
 
 
 def main() -> int:
     cudaq.set_target(os.environ.get("CUDAQ_DEFAULT_SIMULATOR", "qpp-cpu"))
 
-    exact = chemistry.qubit_hamiltonian(ONE_BODY, ERI, scalar_offset=E_NUCLEAR)
-    exact_energy = ground_energy(exact)
+    try:
+        import pyscf  # noqa: F401
+    except ImportError:
+        print("This example needs PySCF:  pip install pyscf")
+        return 0
 
-    # -- A. The compression dial -----------------------------------------
-    full = df.explicit_double_factorization(ERI, threshold=0.0)
-    print(
-        "A. double-factorization compression (fewer leaves -> smaller alpha)")
+    # -- A. The compression dial (H2) ------------------------------------
+    mol, mf = mean_field("H 0 0 0; H 0 0 0.7414")
+    one_body, eri, e_nuc = chemistry.from_pyscf(mf)
+    exact = fci_energy(one_body, eri, mol.nelectron, e_nuc)
+    full = df.explicit_double_factorization(eri, threshold=0.0)
+    print(f"A. H2/STO-3G compression dial (exact FCI = {exact:.6f} Ha)")
     print(f"   {'leaves':>6} {'tensor error':>13} {'alpha':>8} "
-          f"{'dE_ground (Ha)':>15}")
+          f"{'E error (Ha)':>13}")
     for num_leaves in range(1, full.num_leaves + 1):
-        truncated = df.explicit_double_factorization(ERI,
+        truncated = df.explicit_double_factorization(eri,
                                                      max_num_leaves=num_leaves)
-        reconstructed = chemistry.qubit_hamiltonian(
-            ONE_BODY, df.reconstruct_eri(truncated), scalar_offset=E_NUCLEAR)
+        reconstructed_eri = df.reconstruct_eri(truncated)
+        alpha = PauliLCU(
+            chemistry.qubit_hamiltonian(one_body,
+                                        reconstructed_eri,
+                                        scalar_offset=e_nuc)).alpha
+        energy = fci_energy(one_body, reconstructed_eri, mol.nelectron, e_nuc)
         print(
-            f"   {num_leaves:>6} {df.factorization_error(ERI, truncated):>13.2e}"
-            f" {PauliLCU(reconstructed).alpha:>8.4f}"
-            f" {ground_energy(reconstructed) - exact_energy:>+15.2e}")
+            f"   {num_leaves:>6} {df.factorization_error(eri, truncated):>13.2e}"
+            f" {alpha:>8.4f} {energy - exact:>+13.2e}")
 
-    # -- B. One protocol, two encodings ----------------------------------
-    lcu = PauliLCU(exact)
-    dfe = DoubleFactorizedEncoding(ONE_BODY, ERI, scalar_offset=E_NUCLEAR)
+    # -- B. It scales, and DF is compact (N2, 20 qubits) -----------------
+    mol, mf = mean_field("N 0 0 0; N 0 0 1.09")
+    one_body, eri, e_nuc = chemistry.from_pyscf(mf)
+    hamiltonian = chemistry.qubit_hamiltonian(one_body,
+                                              eri,
+                                              scalar_offset=e_nuc)
+    flat = PauliLCU(hamiltonian)
+    factorization = df.explicit_double_factorization(eri, threshold=0.0)
+    dfe = DoubleFactorizedEncoding(one_body,
+                                   factorization,
+                                   scalar_offset=e_nuc)
+    print(f"\nB. N2/STO-3G on {hamiltonian.qubit_count} qubits: "
+          f"same Hamiltonian, two block encodings")
+    print(f"   flat PauliLCU : alpha = {flat.alpha:6.2f}  over "
+          f"{hamiltonian.term_count} Pauli terms")
+    print(f"   double factn  : alpha = {dfe.alpha:6.2f}  over "
+          f"{factorization.num_leaves} leaves")
+    print("   -> DF encodes the same operator with ~50x fewer SELECT building "
+          "blocks,\n      at a comparable one-norm (in a minimal basis the DF "
+          "rank is near\n      full, so alpha barely drops; larger bases "
+          "compress far more).")
+
+    # -- C. One protocol, two encodings ----------------------------------
     print(
-        "\nB. PauliLCU and DoubleFactorizedEncoding both *are* BlockEncodings")
-    for name, encoding in [("PauliLCU", lcu),
+        "\nC. both are BlockEncodings, so Walk/QSVT consume either unchanged")
+    for name, encoding in [("PauliLCU", flat),
                            ("DoubleFactorizedEncoding", dfe)]:
         assert isinstance(encoding, BlockEncoding)
-        # The exact same two calls work on either encoding:
-        walk = Walk(encoding)
-        transformer = QSVT(encoding)
+        Walk(encoding)
+        QSVT(encoding)  # the exact same construction works on both
         print(f"   {name:26s} system={encoding.num_system} "
-              f"ancilla={encoding.num_ancilla} alpha={encoding.alpha:.4f} "
-              f"-> Walk + QSVT built")
+              f"ancilla={encoding.num_ancilla} -> Walk + QSVT built")
 
-    print("\nOK — compression is a visible cost knob, and Walk/QSVT are "
-          "generic over any BlockEncoding (see example 6 to add your own).")
+    print("\nOK — pyscf integrals in, block encodings out; DF is the compact, "
+          "scalable one, and both plug into the same primitives (example 6 "
+          "shows how to add your own).")
     return 0
 
 
