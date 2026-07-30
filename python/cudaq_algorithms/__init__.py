@@ -39,6 +39,7 @@ from . import (block_encoding, common_kernels, df_encoding,
 from .block_encoding import BlockEncoding
 from .common_kernels import state_from
 from .df_encoding import DoubleFactorizedEncoding
+from .df_squared_encoding import DoubleFactorizedSquaredEncoding
 from .pauli_lcu import PauliLCU, select_observable
 from .qsvt import (ADJOINT, FORWARD, PhaseSequence, QSVT,
                    recover_real_time_evolution)
