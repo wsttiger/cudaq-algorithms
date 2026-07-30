@@ -420,8 +420,23 @@ class DoubleFactorizedSquaredEncoding:
     one-norm ``sum_k |F_k| + 1/4 sum_{t,i} |lambda^t_i| (sum_k |v^t_ki|)^2``.
     Both encodings therefore plug interchangeably into ``Walk`` / ``QSVT``.
 
-    Parameters mirror ``DoubleFactorizedEncoding``. Satisfies the
-    ``BlockEncoding`` protocol except ``select_observable`` (LCU-specific).
+    Parameters mirror ``DoubleFactorizedEncoding``, plus ``encode_constant``.
+    With ``encode_constant=True`` (default) the identity term is block-encoded
+    like every other slot, so ``<0|U|0> = H / alpha`` exactly. The squared
+    construction, however, parks the Chebyshev ``-I`` offsets into that identity
+    slot, and an LCU one-norm cannot cancel them against the slots' own ``-I``
+    content, so ``alpha`` is inflated by ``|constant_term|`` and only ties the
+    ZZ-word encoding on the *total* one-norm.
+
+    With ``encode_constant=False`` the identity slot is dropped: the block
+    encodes ``H - constant_term * I`` and ``alpha`` collapses to the published
+    von Burg one-norm ``sum_k |F_k| + 1/4 sum_{t,i} |lambda^t_i| (sum_k
+    |v^t_ki|)^2`` -- strictly below the ZZ-word encoding's one-norm. Add
+    ``constant_term`` back to recovered energies (the standard nuclear-offset
+    convention). This is the query-cost-relevant mode.
+
+    Satisfies the ``BlockEncoding`` protocol except ``select_observable``
+    (LCU-specific).
     """
 
     def __init__(self,
@@ -429,7 +444,9 @@ class DoubleFactorizedSquaredEncoding:
                  two_body: Union[DoubleFactorization, ArrayLike],
                  *,
                  scalar_offset: float = 0.0,
+                 encode_constant: bool = True,
                  coefficient_threshold: float = 1e-12) -> None:
+        self._encode_constant = bool(encode_constant)
         # Reuse the existing encoding VERBATIM for input validation and the
         # kappa / one-body / constant / singles handling. ``base.constant_term``
         # is the existing ``_constant`` (df_const); ``base.factorization`` is
@@ -516,7 +533,11 @@ class DoubleFactorizedSquaredEncoding:
         ordered_frames: list = []
         ordered_weights: list = []
 
-        if abs(const_burg) >= coefficient_threshold:
+        # The identity slot is only block-encoded when requested. Dropping it
+        # (``encode_constant=False``) makes the block encode ``H - const_burg I``
+        # and collapses ``alpha`` to the published von Burg one-norm; the caller
+        # adds ``constant_term`` back to recovered energies.
+        if self._encode_constant and abs(const_burg) >= coefficient_threshold:
             ordered_signs.append(_sign(const_burg))
             ordered_kinds.append(0)
             ordered_targets.append(0)
@@ -700,11 +721,27 @@ class DoubleFactorizedSquaredEncoding:
 
     @property
     def alpha(self) -> float:
+        """Block-encoding one-norm (``<0|U|0> = (H - offset) / alpha``).
+
+        With ``encode_constant=False`` this is the published von Burg one-norm
+        and ``offset = constant_term``; with ``encode_constant=True`` it is
+        inflated by ``|constant_term|`` and ``offset = 0``.
+        """
         return self._alpha
 
     @property
     def constant_term(self) -> float:
+        """The identity offset ``c`` of the encoding.
+
+        When ``encode_constant=False`` the block encodes ``H - c * I``; add
+        ``c`` back to recovered energies. When ``encode_constant=True`` the
+        identity is inside the block (``c`` is carried as its own slot).
+        """
         return self._constant
+
+    @property
+    def encode_constant(self) -> bool:
+        return self._encode_constant
 
     @property
     def factorization(self) -> DoubleFactorization:
@@ -714,6 +751,7 @@ class DoubleFactorizedSquaredEncoding:
         return (f"DoubleFactorizedSquaredEncoding(slots={self._num_slots}, "
                 f"system_qubits={self._num_system}, "
                 f"ancilla_qubits={self._num_ancilla}, "
+                f"encode_constant={self._encode_constant}, "
                 f"alpha={self._alpha:.6g})")
 
     def encode_kernel(self, state_prep: Kernel = None) -> Kernel:

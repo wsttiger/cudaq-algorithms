@@ -21,8 +21,9 @@ import pytest
 import cudaq
 
 import cudaq_algorithms as algorithms
-from cudaq_algorithms import (BlockEncoding, DoubleFactorizedSquaredEncoding,
-                              PhaseSequence, QSVT, Walk)
+from cudaq_algorithms import (BlockEncoding, DoubleFactorizedEncoding,
+                              DoubleFactorizedSquaredEncoding, PhaseSequence,
+                              QSVT, Walk)
 from cudaq_algorithms.common_kernels import state_from
 from cudaq_algorithms import df_squared_encoding as dsq
 
@@ -116,6 +117,57 @@ def test_encode_block_is_h_over_alpha(seed, n):
     ket = random_ket(1 << (2 * n))
     block = encoded_block(encoding, encoding.encode_kernel(), ket)
     np.testing.assert_allclose(block, (h @ ket) / encoding.alpha, atol=1e-11)
+
+
+# ----------------------------------------------------------------------
+# encode_constant=False: the query-cost-relevant mode (block encodes the
+# constant-shifted Hamiltonian at the published von Burg one-norm)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("seed,n", [(7, 2), (21, 2), (5, 3)])
+def test_encode_constant_false_alpha_is_dfnorm_and_beats_existing(seed, n):
+    one_body, eri = random_system(seed, n=n)
+    full = DoubleFactorizedSquaredEncoding(one_body, eri)
+    shifted = DoubleFactorizedSquaredEncoding(one_body,
+                                              eri,
+                                              encode_constant=False)
+    # Dropping the identity slot removes exactly |constant_term| from alpha,
+    # leaving the published von Burg one-norm sum_k|F_k| + 1/4 sum|lambda|S^2.
+    burg = df.double_factorization_one_norm(
+        full.factorization, _kappa_eigenvalues(one_body, full.factorization),
+        "burg")
+    assert shifted.alpha == pytest.approx(full.alpha - abs(full.constant_term),
+                                          rel=1e-12)
+    assert shifted.alpha == pytest.approx(burg, rel=1e-10)
+    # ... and it is strictly below the ZZ-word encoding's total one-norm.
+    existing = DoubleFactorizedEncoding(one_body, eri)
+    assert shifted.alpha < existing.alpha
+    assert shifted.constant_term == pytest.approx(full.constant_term)
+
+
+@pytest.mark.parametrize("seed,n", [(7, 2), (21, 2), (5, 3)])
+def test_encode_constant_false_block_is_shifted_hamiltonian(seed, n):
+    one_body, eri = random_system(seed, n=n)
+    encoding = DoubleFactorizedSquaredEncoding(one_body,
+                                               eri,
+                                               encode_constant=False)
+    h = dense_hamiltonian(one_body, eri)
+    shifted_h = h - encoding.constant_term * np.eye(h.shape[0])
+    ket = random_ket(1 << (2 * n))
+    block = encoded_block(encoding, encoding.encode_kernel(), ket)
+    np.testing.assert_allclose(block, (shifted_h @ ket) / encoding.alpha,
+                               atol=1e-11)
+
+
+def test_encode_constant_true_is_default_and_encodes_full_h():
+    one_body, eri = random_system(21)
+    default = DoubleFactorizedSquaredEncoding(one_body, eri)
+    assert default.encode_constant is True
+    h = dense_hamiltonian(one_body, eri)
+    ket = random_ket(1 << default.num_system)
+    block = encoded_block(default, default.encode_kernel(), ket)
+    np.testing.assert_allclose(block, (h @ ket) / default.alpha, atol=1e-11)
 
 
 def test_scalar_offset_shifts_the_encoded_operator():
