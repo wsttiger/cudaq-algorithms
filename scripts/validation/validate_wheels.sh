@@ -44,7 +44,9 @@
 # cuda-quantum wheel pulls CuPy transitively, which needs a CUDA toolkit -
 # the conda environment provides one on GPU legs.
 
-set -uo pipefail
+# No -u: conda's activate.d hooks (e.g. the CUDA toolkit's nvcc hook)
+# reference unbound variables and would be killed by nounset.
+set -o pipefail
 
 WHEELS_DIR=/root/wheels
 CUDAQ_WHEELS=""
@@ -101,6 +103,11 @@ fi
 
 # OpenBLAS can get bogged down on some machines if using too many threads.
 export OMP_NUM_THREADS=8
+
+# Recent conda refuses non-interactive channel use until the channel Terms
+# of Service are accepted (CondaToSNonInteractiveError). This accepts them
+# on your behalf -- remove if that is not acceptable in your environment.
+export CONDA_PLUGINS_AUTO_ACCEPT_TOS=true
 
 num_failures=0
 declare -a failure_log=()
