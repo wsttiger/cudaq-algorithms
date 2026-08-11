@@ -268,3 +268,21 @@ def test_ceo_operator_pool_correctness():
          ("YYXY", -0.25 + 0j)],
     ]
     assert generated == [sorted(terms) for terms in expected]
+
+
+def test_uccsd_spin_two_mixed_double_matches_fermionic_generator():
+    num_qubits = 8
+    target = [4, 1, 3, 6]
+    excitations = algorithms.stateprep.get_uccsd_excitations(
+        num_qubits, 4, 2)
+    mixed_offset = len(excitations[0]) + len(excitations[1])
+    pool_index = mixed_offset + excitations[2].index(target)
+    pool = algorithms.stateprep.make_uccsd_operator_pool(num_qubits, 4, 2)
+    _, double = _fermionic_generators(num_qubits)
+    reference = 1.0j * double(target[3], target[2], target[1], target[0])
+
+    # Exact equality to an independently built Jordan-Wigner generator proves
+    # that overlapping parity strings in the pool cancel correctly.
+    np.testing.assert_allclose(_dense_at_width(pool[pool_index], num_qubits),
+                               reference,
+                               atol=1e-12)
