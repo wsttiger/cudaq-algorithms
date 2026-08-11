@@ -313,9 +313,13 @@ def test_spin_operator_explicit_width_validation():
 
 
 def test_spin_operator_identity_term_extent():
-    # Identity terms act on no degrees (CUDA-Q raises from max_degree);
-    # they must not constrain or crash the register-extent inference.
-    op = 0.25 * spin.i(0) + 0.5 * spin.x(1)
+    # Scalar/arithmetic identity terms act on NO degrees, and CUDA-Q's
+    # max_degree raises on them rather than returning a sentinel; they
+    # must not constrain or crash the register-extent inference. Note
+    # spin.i(0) does NOT exercise this path (it explicitly targets degree
+    # 0) -- only the scalar form does, which is exactly what the chemistry
+    # bridge produces via scalar_offset.
+    op = 0.5 * spin.x(1) + 0.25
     encoding = PauliLCU(op)
     assert encoding.num_system == 2
     assert {word for _, word in encoding.terms} == {"II", "IX"}
