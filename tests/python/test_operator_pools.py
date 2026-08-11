@@ -273,8 +273,7 @@ def test_ceo_operator_pool_correctness():
 def test_uccsd_spin_two_mixed_double_matches_fermionic_generator():
     num_qubits = 8
     target = [4, 1, 3, 6]
-    excitations = algorithms.stateprep.get_uccsd_excitations(
-        num_qubits, 4, 2)
+    excitations = algorithms.stateprep.get_uccsd_excitations(num_qubits, 4, 2)
     mixed_offset = len(excitations[0]) + len(excitations[1])
     pool_index = mixed_offset + excitations[2].index(target)
     pool = algorithms.stateprep.make_uccsd_operator_pool(num_qubits, 4, 2)

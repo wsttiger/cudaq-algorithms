@@ -201,14 +201,13 @@ def test_uccsd_interleaved_mixed_double_matches_dense_exponential():
 
     actual = _state(_uccsd_entry, num_qubits, occupation, thetas,
                     num_electrons, spin)
-    reference = _dense_product_reference(
-        _pool_term_groups(pool, num_qubits),
-        [t * s for t, s in zip(thetas,
-                                _uccsd_circuit_signs(num_qubits,
-                                                     num_electrons, spin))],
-        num_qubits,
-        _hf_ket(num_qubits, occupation),
-        scale=-0.5)
+    reference = _dense_product_reference(_pool_term_groups(pool, num_qubits), [
+        t * s for t, s in zip(
+            thetas, _uccsd_circuit_signs(num_qubits, num_electrons, spin))
+    ],
+                                         num_qubits,
+                                         _hf_ket(num_qubits, occupation),
+                                         scale=-0.5)
     # Only the [4, 1] -> [3, 6] amplitude is non-zero, so this assertion
     # isolates the mixed double whose occupied and virtual ranges overlap.
     _assert_close(actual, reference)
