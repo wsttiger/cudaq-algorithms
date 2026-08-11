@@ -280,3 +280,42 @@ def test_string_hamiltonian_rejected_with_type_error():
     # TypeError, not a misleading unpack error from the pair branch.
     with pytest.raises(TypeError, match="SpinOperator"):
         PauliLCU("XZ")
+
+
+def test_spin_operator_off_zero_and_gapped_register_extent():
+    # Regression (QA): the inferred register width must be the largest
+    # targeted qubit + 1, not CUDA-Q's qubit_count (the number of
+    # *distinct* targets). Off-zero and gapped operators are legal inputs
+    # and previously died in CUDA-Q's raw get_pauli_word padding error.
+    off_zero = PauliLCU(0.5 * spin.x(1))
+    assert off_zero.num_system == 2
+    assert off_zero.alpha == pytest.approx(0.5)
+    # The encoded block must be the dense operator, not just constructible.
+    ket = random_ket(2, seed=3)
+    expected = dense_matrix([(0.5, "IX")], 2) @ ket / off_zero.alpha
+    state = np.array(cudaq.get_state(off_zero.encode_kernel(),
+                                     state_from(ket)))
+    np.testing.assert_allclose(state[:4], expected, atol=1e-12)
+
+    gapped = PauliLCU(spin.x(0) + spin.z(3))
+    assert gapped.num_system == 4
+    assert {word for _, word in gapped.terms} == {"XIII", "IIIZ"}
+
+
+def test_spin_operator_explicit_width_validation():
+    # An explicit num_qubits wider than the extent pads; an undersized one
+    # must raise the package's clear error before CUDA-Q's raw padding
+    # error can fire.
+    wider = PauliLCU(spin.x(0) + spin.z(3), num_qubits=6)
+    assert wider.num_system == 6
+    with pytest.raises(ValueError, match="smaller than the operator"):
+        PauliLCU(spin.x(0) + spin.z(3), num_qubits=2)
+
+
+def test_spin_operator_identity_term_extent():
+    # Identity terms act on no degrees (CUDA-Q raises from max_degree);
+    # they must not constrain or crash the register-extent inference.
+    op = 0.25 * spin.i(0) + 0.5 * spin.x(1)
+    encoding = PauliLCU(op)
+    assert encoding.num_system == 2
+    assert {word for _, word in encoding.terms} == {"II", "IX"}
