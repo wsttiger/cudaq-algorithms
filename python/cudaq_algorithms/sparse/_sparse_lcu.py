@@ -260,6 +260,57 @@ def _term_body(kind: str, i: int, j: int, sign: int, num_system: int) -> list:
     return _pair_body(i, j, kind == _REFLECTED_TRANSPOSITION, sign, num_system)
 
 
+def _first_asymmetry(entries: dict) -> tuple | None:
+    """The first ``(i, j, value, partner)`` violating symmetry, or None.
+
+    Shared by the constructor (which raises on it) and ``encode_sparse``
+    (which dilates instead).
+    """
+    for (i, j), value in sorted(entries.items()):
+        partner = entries.get((j, i), 0.0)
+        if abs(value - partner) > 1e-12 * max(1.0, abs(value)):
+            return i, j, value, partner
+    return None
+
+
+def _build_terms(entries: dict) -> list:
+    """The LCU term list ``(kind, i, j, weight, sign)`` for symmetric
+    entries — the one-norm bookkeeping of the module docstring. Shared by
+    the constructor and ``encode_sparse``'s classical pricing, so the
+    priced ``alpha`` (the weight sum) is identically the built one."""
+    terms: list = []
+    for (i, j) in sorted(entries):
+        value = entries[(i, j)]
+        weight = abs(value) / 2.0
+        sign = 1 if value > 0.0 else -1
+        if i == j:
+            terms.append((_IDENTITY, i, i, weight, sign))
+            terms.append((_REFLECTION, i, i, weight, -sign))
+        elif i < j:
+            terms.append((_TRANSPOSITION, i, j, weight, sign))
+            terms.append((_REFLECTED_TRANSPOSITION, i, j, weight, sign))
+    return terms
+
+
+def _bodies_and_work(terms: list, num_system: int) -> tuple[list, int]:
+    """SELECT bodies for the terms plus the required work width (>= 1: an
+    empty work view must never cross the kernel boundary,
+    cuda-quantum#4847). Classical — shared with ``encode_sparse``'s
+    pricing, which needs the exact width without minting kernels."""
+    bodies = [
+        _term_body(kind, i, j, sign, num_system)
+        for kind, i, j, _, sign in terms
+    ]
+    num_work = 1
+    for body in bodies:
+        for item in body:
+            if item[0] in ("and_tt", "and_wt"):
+                num_work = max(num_work, item[3] + 1)
+            elif item[0] in ("copy_tw", ):
+                num_work = max(num_work, item[2] + 1)
+    return bodies, num_work
+
+
 class SparseLCUEncoding:
     """Block encoding of ``H / alpha`` from the entries of a real
     symmetric matrix ``H`` (see the module docstring).
@@ -286,41 +337,18 @@ class SparseLCUEncoding:
         if not entries:
             raise ValueError("matrix has no nonzero entries: nothing to "
                              "encode")
-        for (i, j), value in sorted(entries.items()):
-            partner = entries.get((j, i), 0.0)
-            if abs(value - partner) > 1e-12 * max(1.0, abs(value)):
-                raise ValueError(
-                    f"matrix is not symmetric at ({i}, {j}): {value} vs "
-                    f"{partner}; encode a general square matrix through "
-                    "SparseLCUEncoding.from_general (Hermitian dilation)")
+        asymmetry = _first_asymmetry(entries)
+        if asymmetry is not None:
+            i, j, value, partner = asymmetry
+            raise ValueError(
+                f"matrix is not symmetric at ({i}, {j}): {value} vs "
+                f"{partner}; encode a general square matrix through "
+                "SparseLCUEncoding.from_general (Hermitian dilation)")
 
         num_system = max(1, (size - 1).bit_length())
-        terms: list = []
-        for (i, j) in sorted(entries):
-            value = entries[(i, j)]
-            weight = abs(value) / 2.0
-            sign = 1 if value > 0.0 else -1
-            if i == j:
-                terms.append((_IDENTITY, i, i, weight, sign))
-                terms.append((_REFLECTION, i, i, weight, -sign))
-            elif i < j:
-                terms.append((_TRANSPOSITION, i, j, weight, sign))
-                terms.append((_REFLECTED_TRANSPOSITION, i, j, weight, sign))
-
+        terms = _build_terms(entries)
         preparation = AliasSamplingPrepare([t[3] for t in terms], mu)
-        bodies = [
-            _term_body(kind, i, j, sign, num_system)
-            for kind, i, j, _, sign in terms
-        ]
-        num_work = 1  # >= 1: the work view always crosses the kernel
-        # boundary and an empty view must never do so (cuda-quantum#4847).
-        for body in bodies:
-            for item in body:
-                if item[0] in ("and_tt", "and_wt"):
-                    num_work = max(num_work, item[3] + 1)
-                elif item[0] in ("copy_tw", ):
-                    num_work = max(num_work, item[2] + 1)
-
+        bodies, num_work = _bodies_and_work(terms, num_system)
         select = unary_iteration_kernels(preparation.num_index,
                                          len(terms),
                                          lambda k: bodies[k],
