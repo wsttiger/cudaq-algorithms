@@ -268,6 +268,18 @@ class AliasSamplingPrepare:
         return 2 * self._num_index + 2 * self._mu + 4
 
     @property
+    def ladder_offset(self) -> int:
+        """Offset of the ``num_index``-wide QROM ladder inside garbage.
+
+        The ladder qubits are clean (|0>) between ``kernel()`` and
+        ``adjoint_kernel()`` — unlike the rest of the garbage — so a
+        SELECT sandwiched between them may reuse
+        ``garbage[ladder_offset : ladder_offset + num_index]`` as its own
+        ladder.
+        """
+        return self._num_index + 2 * self._mu + 3
+
+    @property
     def keep(self) -> tuple[int, ...]:
         """Per-bin mu-bit keep thresholds (full bins clamped, self-aliased)."""
         return self._keep
