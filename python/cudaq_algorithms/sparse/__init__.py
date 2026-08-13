@@ -9,6 +9,8 @@ from the package root.
 
 from ._alias_sampling import AliasSamplingPrepare
 from ._banded import banded_oracles
+from ._factory import encode_sparse
+from ._from_data import qrom_oracles
 from ._qrom import QROM
 from ._sparse_lcu import SparseLCUEncoding
 from ._sparse_oracle import OracleKernels, SparseOracleEncoding
@@ -22,5 +24,7 @@ __all__ = [
     "SparseOracleEncoding",
     "UnaryIterationKernels",
     "banded_oracles",
+    "encode_sparse",
+    "qrom_oracles",
     "unary_iteration_kernels",
 ]
