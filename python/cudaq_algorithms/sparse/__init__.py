@@ -8,10 +8,15 @@ from the package root.
 """
 
 from ._banded import banded_oracles
+from ._qrom import QROM
 from ._sparse_oracle import OracleKernels, SparseOracleEncoding
+from ._unary_iteration import UnaryIterationKernels, unary_iteration_kernels
 
 __all__ = [
     "OracleKernels",
+    "QROM",
     "SparseOracleEncoding",
+    "UnaryIterationKernels",
     "banded_oracles",
+    "unary_iteration_kernels",
 ]
