@@ -27,9 +27,10 @@ kernels and host-side helpers (the only runtime requirement is the
 
 Simulation-only helpers (statevector access) are isolated in
 `cudaq_algorithms.sim_utils`; everything else is hardware-shaped. The
-documentation is a Sphinx site under [docs/](https://github.com/NVIDIA/cudaq-algorithms/tree/main/docs) (build instructions in
-[docs/README.md](https://github.com/NVIDIA/cudaq-algorithms/blob/main/docs/README.md)); the runnable, self-verifying examples
-live in [docs/sphinx/examples/python/](https://github.com/NVIDIA/cudaq-algorithms/tree/main/docs/sphinx/examples/python).
+[documentation](https://nvidia.github.io/cudaq-algorithms/) covers installation, a getting-started learning
+series, per-subsystem guides, and the API reference; the runnable,
+self-verifying examples are [rendered there](https://nvidia.github.io/cudaq-algorithms/examples_rst/getting_started.html) and live
+in [docs/sphinx/examples/python/](https://github.com/NVIDIA/cudaq-algorithms/tree/main/docs/sphinx/examples/python).
 
 Classical chemistry preprocessing ships as a peer pure-Python module:
 double factorization of two-electron integrals (X-DF and C-DF/RC-DF) on
