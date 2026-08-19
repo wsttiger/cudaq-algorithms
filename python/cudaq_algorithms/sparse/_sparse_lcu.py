@@ -70,10 +70,15 @@ garbage(2m + 2 mu + 4) | select_work]``:
 
 Self-adjointness: every term unitary squares to the identity and SELECT
 is block-diagonal over the index, so ``SELECT^2 = I`` and ``U_A =
-P-dagger S P`` is exactly self-adjoint and involutory — ``Walk``'s
-Chebyshev powers and ``QSVT``'s reuse of ``apply_kernel`` for adjoint
-directions hold with no separate adjoint factory (pinned by the
-involution test). Walk reflections cover the **full** ancilla register,
+P-dagger S P`` is exactly self-adjoint and involutory **on states whose
+ancilla register enters in |0...0>** — the domain every consumer
+supplies, and the domain the involution test pins. It is NOT a global
+matrix identity: SELECT's unary-iteration walk is an involution only
+when its ladder enters clean, so composing ``U_A`` by hand on a dirty
+ancilla register silently breaks ``U_A^2 = I`` (``SparseOracleEncoding``'s
+identical claim, by contrast, is global). ``Walk``'s Chebyshev powers
+and ``QSVT``'s reuse of ``apply_kernel`` for adjoint directions hold
+with no separate adjoint factory. Walk reflections cover the **full** ancilla register,
 garbage included: at every reflection point the circuit is in the
 sandwiched frame where dirty garbage has been uncomputed, and the
 scratch-folding argument of ``_sparse_oracle`` applies unchanged.
@@ -329,7 +334,11 @@ class SparseLCUEncoding:
 
     Satisfies the ``BlockEncoding`` protocol except ``select_observable``
     (the term unitaries are not Pauli words, so the odd-moment observable
-    trick is unavailable), exactly as ``SparseOracleEncoding``.
+    trick is unavailable), exactly as ``SparseOracleEncoding``. Measure
+    Chebyshev data through ``Walk(...).walk_kernel`` powers, not
+    ``Walk.moment``: the even-moment reflection observable expands to
+    ``2^num_ancilla`` Pauli terms, astronomical at this encoding's
+    ancilla widths (``Walk`` refuses fast rather than hanging).
     """
 
     def __init__(self, matrix, *, mu: int = 8, dim: int | None = None):

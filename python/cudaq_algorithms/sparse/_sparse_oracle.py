@@ -178,8 +178,12 @@ class SparseOracleEncoding:
         System register width ``n`` (the encoded matrix is ``2^n x 2^n``).
 
     Satisfies the ``BlockEncoding`` protocol except ``select_observable``
-    (LCU-specific odd-moment hook), which raises ``NotImplementedError``;
-    even walk moments and every kernel factory work unchanged.
+    (LCU-specific odd-moment hook), which raises ``NotImplementedError``.
+    Every kernel factory works unchanged; measure Chebyshev data through
+    ``Walk(...).walk_kernel`` powers rather than ``Walk.moment`` — the
+    even-moment reflection observable expands to ``2^num_ancilla`` Pauli
+    terms, astronomical at this encoding's ancilla widths (``Walk``
+    refuses fast rather than hanging).
     """
 
     def __init__(self, oracles: OracleKernels, num_system: int) -> None:
