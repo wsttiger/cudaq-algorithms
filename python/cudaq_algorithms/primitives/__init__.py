@@ -13,12 +13,16 @@ chains lookups of several tables over one address register at
 ``m + 1`` (not ``2 m``) lookups via the same paper's difference-table
 fusion — the surface THC-style multiplexed-rotation SELECTs consume.
 
-Everything here is strictly unitary: the papers' headline Toffoli counts
-assume measurement-based ancilla uncomputation, which this library does
-not use (primitives must stay statevector-testable and
-inverse-composable); the module docstrings state the coherent costs the
-minted kernels actually have, and the resource tests pin them against
-the compiler.
+The default primitives are strictly unitary: the papers' headline
+Toffoli counts assume measurement-based ancilla uncomputation, and the
+module docstrings state the coherent costs the minted kernels actually
+have, pinned against the compiler by the resource tests.
+``measured_unary_iteration_kernels`` is the measurement-assisted
+variant: the same SELECT channel with every ladder ancilla disposed of
+by Gidney's measure-and-fix-up gadget (`arXiv:1709.06648`), realizing
+the papers' ``N - 1``-Toffoli accounting at the price of mid-circuit
+measurement (composes as a sub-kernel, but is incompatible with
+``cudaq.control`` and ``cudaq.sample`` — see its module docstring).
 
 Import the subpackage directly (``from cudaq_algorithms.primitives
 import QROM``); nothing here is re-exported from the package root.
@@ -27,10 +31,14 @@ import QROM``); nothing here is re-exported from the package root.
 from ._qrom import QROM
 from ._qrom_chain import QROMChain
 from ._unary_iteration import UnaryIterationKernels, unary_iteration_kernels
+from ._unary_iteration_measured import (MeasuredUnaryIterationKernels,
+                                        measured_unary_iteration_kernels)
 
 __all__ = [
+    "MeasuredUnaryIterationKernels",
     "QROM",
     "QROMChain",
     "UnaryIterationKernels",
+    "measured_unary_iteration_kernels",
     "unary_iteration_kernels",
 ]

@@ -264,3 +264,73 @@ unitary unwrite walks instead; the paper's caching register for the
 re-writing chain variant (its Eq. (4) `(m + 2)` fix-up flavor) is moot
 in the clean setting (every step restores its own ancillas); the
 cross-boundary walk fusion noted above (`m + 2` block walks).
+
+## Measured-variant record (branch experimental/measured_unary_iteration)
+
+`_unary_iteration_measured.py` adds the MBU walk (Babbush Fig. 7 retrace
++ Gidney measured AND-uncompute) as a sibling of the coherent fused
+walk, same public surface. Sources: papers only; Qualtran consulted as
+reference for conventions, no code adopted. All CUDA-Q findings below
+are from probes on pip cudaq 0.15.1 / qpp-cpu.
+
+### Probe results (the CUDA-Q findings this branch was after)
+
+- **P1 (feedback in kernels): YES.** `m = mz(q); if m: ...` compiles and
+  runs, including inside the flat-interpreter dispatch loop (`if op ==
+  21:` with `mz` + conditional gates, outcome held in a bool declared
+  before the loop; lists of outcome bools also work). The interpreter
+  pattern hosts measurement — no unrolled-kernel fallback needed.
+- **P2 (determinism): conditional.** `get_state` simulates one random
+  trajectory (an outcome-DEPENDENT circuit gives different states run to
+  run), but the fix-up steers both outcomes of every gadget to the same
+  state, so the full MBU walk is bitwise repeatable — dense-reference
+  testing works. The gadget needs a classically controlled X after the
+  measurement or the ladder line is left in |outcome>, not |0> (first
+  probe caught exactly this).
+- **P3 (estimate_resources): accepts measuring kernels** (via a plain
+  harness — it needs concrete arguments). `mz` and the unconditional
+  AND `ccx`s are counted exactly; gates inside the `if m:` branch are
+  counted along ONE deterministic trajectory (10 of 14 fix-up `cz`s on
+  the 4-bit full tree, repeatably), so only unconditional ops are
+  pinnable. `count_controls("x", 2)` == emitter bookkeeping holds.
+- **P4 (composition): minted measured kernels compose as sub-kernels**
+  of plain kernels. `cudaq.control` on a measuring kernel is NOT
+  rejected — it is silently accepted and yields the wrong channel on a
+  superposed control (measurement collapses across control branches and
+  renormalizes them; not even outcome-deterministic), and `cudaq.draw`
+  crashes on the same construction (IndexError). `cudaq.sample` rejects
+  feedback kernels only at the entry kernel; wrapped in a harness the
+  same feedback slips past the check. The test pins the control
+  boundary as "raises OR is not the controlled channel".
+
+### Construction decisions
+
+- Plain retrace walk, one emitter for both directions: between leaves
+  measure away the levels below the common ancestor (against the
+  outgoing leaf's bits, X-conjugated for 0-bits — the fix-up CZ must be
+  conjugated exactly as the compute was), CNOT-cross to the sibling,
+  recompute with fresh ANDs. `kernel_adj` = the same emitter in reverse
+  leaf order with each (self-inverse) body reversed — an MBU circuit's
+  adjoint is an MBU circuit, not a reversed tape.
+- Gadget = one opcode (21/22): `h; mz; if 1: reset X + fix-up CZ`
+  (CZ against parent ladder line and address wire; opcode 22 fixes
+  against the external control at the root). Controlled variant folds
+  the control into the root AND — nothing measured is ever controlled,
+  and the fix-up CZ is the identity on the control-off branch.
+- Extended body vocabulary ported unchanged (unitary, orthogonal to the
+  uncompute strategy); verified against the coherent walk in tests.
+
+### Cost comparison (full trees, N addresses; emitter == compiler)
+
+| walk                | Toffolis (unctrl) | Toffolis (ctrl) | T-count    | measurements |
+|---------------------|-------------------|-----------------|------------|--------------|
+| measured (this)     | N - 2             | N - 1           | ~4 N       | = Toffolis   |
+| coherent fused      | 3N/2 - 5          | 3N/2 - 1        | ~7.5 N     | 0            |
+| naive unitary       | 2N - 4            | 2N - 2          | ~8 N       | 0            |
+
+Caveat: the measured walk's Toffolis are all compute-from-|0> ANDs
+(4 T each, Gidney), while ~a third of the fused walk's are dirty-target
+(7 T) — the T-count gap (~2x) is larger than the Toffoli gap suggests.
+Verified: statevector equality with the coherent walk to 1e-12 on
+superposed address x target (x control) inputs, repeated runs, full and
+partial trees; walk . adj identity likewise.
