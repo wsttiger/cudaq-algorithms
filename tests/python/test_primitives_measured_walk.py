@@ -25,6 +25,7 @@ import numpy as np
 import pytest
 
 import cudaq
+from cudaq import spin
 
 from cudaq_algorithms.primitives import (measured_unary_iteration_kernels,
                                          unary_iteration_kernels)
@@ -45,8 +46,10 @@ def _body(k):
 
 
 def _superposed_states(num_bits, controlled, kernel):
-    """Run ``kernel`` on the superposed reference input (uniform address,
-    rotated control and targets) and return the statevector."""
+    """Run ``kernel`` on the superposed reference input (uniform address
+    with per-bit phases, rotated control and targets — COMPLEX amplitudes:
+    a misplaced fix-up CZ is a relative phase, invisible on real-amplitude
+    states) and return the statevector."""
 
     if controlled:
 
@@ -57,10 +60,14 @@ def _superposed_states(num_bits, controlled, kernel):
             ladder = cudaq.qvector(num_bits)
             target = cudaq.qvector(2)
             ry(0.7, control[0])
+            rz(0.41, control[0])
             for i in range(num_bits):
                 h(address_reg[i])
+                rz(0.23 + 0.31 * i, address_reg[i])
             ry(0.3, target[0])
+            rz(0.57, target[0])
             ry(1.1, target[1])
+            rz(1.37, target[1])
             kernel(control, address_reg, ladder, target)
     else:
 
@@ -71,8 +78,11 @@ def _superposed_states(num_bits, controlled, kernel):
             target = cudaq.qvector(2)
             for i in range(num_bits):
                 h(address_reg[i])
+                rz(0.23 + 0.31 * i, address_reg[i])
             ry(0.3, target[0])
+            rz(0.57, target[0])
             ry(1.1, target[1])
+            rz(1.37, target[1])
             kernel(address_reg, ladder, target)
 
     return np.array(cudaq.get_state(run))
@@ -379,7 +389,8 @@ def test_measured_describe_decodes_the_tape():
     assert sum("# Toffoli" in line for line in lines) == walk.toffoli_count
     gadget_lines = [line for line in lines if "# measured uncompute" in line]
     assert len(gadget_lines) == walk.num_measurements
-    assert "mz -> fixup z.ctrl" in gadget_lines[0]
+    assert "mz -> x(ladder" in gadget_lines[0]
+    assert "fixup z.ctrl" in gadget_lines[0]
     body_lines = [line for line in lines if line.startswith("x(target[0])")]
     assert len(body_lines) == 4
 
@@ -432,3 +443,126 @@ def test_measured_walk_extended_body_vocabulary_ports():
     for _ in range(4):
         state = np.array(cudaq.get_state(run_measured))
         np.testing.assert_allclose(state, reference, atol=1e-12)
+
+
+# ----------------------------------------------------------------------
+# 6. Review hardening: cross-implementation composition and observe
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("controlled", [False, True])
+def test_measured_walk_then_coherent_adjoint_is_identity(controlled):
+    # The strongest single equivalence statement available: the measured
+    # walk composed with the COHERENT walk's hand-written inverse must be
+    # the identity on complex-amplitude inputs. It couples the two
+    # implementations' channels AND their global-phase conventions in one
+    # assertion (a same-implementation round trip would cancel a shared
+    # phase error; this cannot).
+    measured = measured_unary_iteration_kernels(3,
+                                                8,
+                                                _body,
+                                                controlled=controlled)
+    coherent = unary_iteration_kernels(3, 8, _body, controlled=controlled)
+    m_kernel = measured.kernel
+    c_adj = coherent.kernel_adj
+    num_bits = 3
+
+    if controlled:
+
+        @cudaq.kernel
+        def roundtrip():
+            control = cudaq.qvector(1)
+            address_reg = cudaq.qvector(num_bits)
+            ladder = cudaq.qvector(num_bits)
+            target = cudaq.qvector(2)
+            ry(0.7, control[0])
+            rz(0.41, control[0])
+            for i in range(num_bits):
+                h(address_reg[i])
+                rz(0.23 + 0.31 * i, address_reg[i])
+            ry(0.3, target[0])
+            rz(0.57, target[0])
+            m_kernel(control, address_reg, ladder, target)
+            c_adj(control, address_reg, ladder, target)
+
+        @cudaq.kernel
+        def prep_only():
+            control = cudaq.qvector(1)
+            address_reg = cudaq.qvector(num_bits)
+            ladder = cudaq.qvector(num_bits)
+            target = cudaq.qvector(2)
+            ry(0.7, control[0])
+            rz(0.41, control[0])
+            for i in range(num_bits):
+                h(address_reg[i])
+                rz(0.23 + 0.31 * i, address_reg[i])
+            ry(0.3, target[0])
+            rz(0.57, target[0])
+    else:
+
+        @cudaq.kernel
+        def roundtrip():
+            address_reg = cudaq.qvector(num_bits)
+            ladder = cudaq.qvector(num_bits)
+            target = cudaq.qvector(2)
+            for i in range(num_bits):
+                h(address_reg[i])
+                rz(0.23 + 0.31 * i, address_reg[i])
+            ry(0.3, target[0])
+            rz(0.57, target[0])
+            m_kernel(address_reg, ladder, target)
+            c_adj(address_reg, ladder, target)
+
+        @cudaq.kernel
+        def prep_only():
+            address_reg = cudaq.qvector(num_bits)
+            ladder = cudaq.qvector(num_bits)
+            target = cudaq.qvector(2)
+            for i in range(num_bits):
+                h(address_reg[i])
+                rz(0.23 + 0.31 * i, address_reg[i])
+            ry(0.3, target[0])
+            rz(0.57, target[0])
+
+    reference = np.array(cudaq.get_state(prep_only))
+    for _ in range(3):
+        state = np.array(cudaq.get_state(roundtrip))
+        np.testing.assert_allclose(state, reference, atol=1e-12)
+
+
+def test_cudaq_observe_accepts_measured_walk_and_agrees():
+    # cudaq.observe accepts the measuring kernel and returns the coherent
+    # walk's expectation — a positive framework boundary worth pinning:
+    # observe is the first executor a SELECT user reaches for.
+    measured = measured_unary_iteration_kernels(2, 4, _body)
+    coherent = unary_iteration_kernels(2, 4, _body)
+    m_kernel = measured.kernel
+    c_kernel = coherent.kernel
+
+    @cudaq.kernel
+    def m_harness():
+        address_reg = cudaq.qvector(2)
+        ladder = cudaq.qvector(2)
+        target = cudaq.qvector(2)
+        for i in range(2):
+            h(address_reg[i])
+            rz(0.23 + 0.31 * i, address_reg[i])
+        ry(0.3, target[0])
+        m_kernel(address_reg, ladder, target)
+
+    @cudaq.kernel
+    def c_harness():
+        address_reg = cudaq.qvector(2)
+        ladder = cudaq.qvector(2)
+        target = cudaq.qvector(2)
+        for i in range(2):
+            h(address_reg[i])
+            rz(0.23 + 0.31 * i, address_reg[i])
+        ry(0.3, target[0])
+        c_kernel(address_reg, ladder, target)
+
+    observable = spin.z(4) + 0.5 * spin.x(5)
+    for _ in range(3):
+        measured_value = cudaq.observe(m_harness, observable).expectation()
+        coherent_value = cudaq.observe(c_harness, observable).expectation()
+        assert abs(measured_value - coherent_value) < 1e-12
