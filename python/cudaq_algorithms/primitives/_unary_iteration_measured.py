@@ -55,7 +55,9 @@ superposed control (the measurement collapses across control branches
 and renormalizes them — not even outcome-deterministic); the test suite
 pins that boundary. ``cudaq.sample`` rejects entry kernels that branch
 on measurement results (the check does not see feedback inside
-sub-kernels); use ``cudaq.run`` / ``cudaq.get_state``.
+sub-kernels); use ``cudaq.run`` / ``cudaq.get_state``. ``cudaq.observe``
+accepts these kernels and returns the correct (coherent-equal)
+expectation — pinned by test.
 
 Public surface: this module mirrors ``unary_iteration_kernels`` exactly —
 the same factory-time body callback contract and instruction vocabulary
@@ -106,13 +108,16 @@ _OP_MEAS_UNCOMPUTE_CTRL = 22  # ... fixup z.ctrl(control[0], address[c])
 
 _MEASURED_OPCODES = (_OP_MEAS_UNCOMPUTE, _OP_MEAS_UNCOMPUTE_CTRL)
 
+# Display order matches kernel execution (reset X, then fixup CZ; the two
+# commute). The _CTRL template takes no ladder operand: b is emitted as 0
+# and unused — the fixup control is the external control line.
 _OP_DESCRIPTIONS_MEASURED = dict(_OP_DESCRIPTIONS)
 _OP_DESCRIPTIONS_MEASURED[_OP_MEAS_UNCOMPUTE] = (
-    "h(ladder[{a}]); mz -> fixup z.ctrl(ladder[{b}], address[{c}]), "
-    "x(ladder[{a}])  # measured uncompute")
+    "h(ladder[{a}]); mz -> x(ladder[{a}]), "
+    "fixup z.ctrl(ladder[{b}], address[{c}])  # measured uncompute")
 _OP_DESCRIPTIONS_MEASURED[_OP_MEAS_UNCOMPUTE_CTRL] = (
-    "h(ladder[{a}]); mz -> fixup z.ctrl(control[0], address[{c}]), "
-    "x(ladder[{a}])  # measured uncompute")
+    "h(ladder[{a}]); mz -> x(ladder[{a}]), "
+    "fixup z.ctrl(control[0], address[{c}])  # measured uncompute")
 
 
 @dataclass(frozen=True)
@@ -125,9 +130,9 @@ class MeasuredUnaryIterationKernels:
         The walk and its inverse walk (``kernel_adj`` is ``None`` when
         minted with ``include_adjoint=False``). Both contain mid-circuit
         measurements: run them with ``cudaq.get_state`` / ``cudaq.run``
-        (``cudaq.sample`` rejects them) and never pass them to
-        ``cudaq.control`` — the controlled variant must be minted with
-        ``controlled=True`` instead.
+        / ``cudaq.observe`` (``cudaq.sample`` rejects them) and never
+        pass them to ``cudaq.control`` — the controlled variant must be
+        minted with ``controlled=True`` instead.
     num_address, num_ladder, num_items
         Register widths (``num_ladder == num_address`` clean ancillas)
         and the number of iterated addresses.
