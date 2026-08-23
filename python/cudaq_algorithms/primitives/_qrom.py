@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""QROM: coherent classical-table lookup, two constructions in one surface.
+"""QROM: coherent classical-table lookup, three constructions in one surface.
 
 ``QROM(data, address_bits, output_bits)`` mints the lookup
 ``|k>|y> -> |k>|y XOR data[k]>`` behind one kernel signature
 ``(address: qview, ladder: qview, output: qview)`` — all little-endian
 (qubit 0 = LSB, ``docs/conventions.md``), ``ladder`` being ``num_ladder``
 clean ancillas (|0> in, |0> out). Addresses ``k >= len(data)`` read as
-zero. Two constructions sit behind ``variant=``:
+zero. Three constructions sit behind ``variant=``:
 
 - ``"select"`` — the plain unary-iteration QROM (Babbush et al.,
   `arXiv:1805.03662`): one fused tree walk over the address register
@@ -23,9 +23,31 @@ zero. Two constructions sit behind ``variant=``:
   and CNOTs copy slot 0 into the output. The routing and the writes are
   then undone unitarily. ``num_ladder = (address_bits - log2(B)) +
   B * output_bits`` (walk lines first, then the block registers).
-- ``"auto"`` (default) — price both variants (and every power-of-two
-  ``block_size``) with the exact Toffoli model below and take the
-  cheapest, preferring ``"select"`` on ties (fewer ancillas).
+- ``"select_copy"`` — SELECT-COPY (Motlagh & Pocrnic,
+  `arXiv:2605.20334`, Sec. II.B), adapted here to clean ancillas and a
+  fully unitary sandwich. The paper's insight: the select_swap middle —
+  route block ``r`` into slot 0, copy slot 0 to the output, route back —
+  *is* one multiplexed copy, ``|q>|r>|y> (x)_j |phi_j> ->
+  |q>|r>|y XOR phi_r> (x)_j |phi_j>``, implementable as a second unary-
+  iteration walk over the low ``log2(B)`` address bits whose per-``r``
+  body Toffoli-copies block register ``r`` into the output. Following
+  the paper's refinement, the first block-index walk writes entry
+  ``(q, 0)`` straight into the output (leaf-controlled CNOTs — free) and
+  ``data[q, r] XOR data[q, 0]`` into block register ``r`` for
+  ``r = 1..B-1``, the multiplexed copy runs over those ``B - 1``
+  registers (its ``r = 0`` body is empty), and a final block-index walk
+  unwrites the registers only (X-only, self-inverse). This replaces the
+  two swap networks (``2 b (B - 1)`` Toffolis plus a ``4 b (B - 1)``
+  CNOT storm) with one copy walk (``W(log2(B), B) + b (B - 1)``
+  Toffolis, no routing CNOTs) and drops one block register:
+  ``num_ladder = max(address_bits - log2(B), log2(B)) +
+  (B - 1) * output_bits`` (a shared walk-line pool — the block-index and
+  low-address walks run sequentially and both restore their lines — then
+  the block registers).
+- ``"auto"`` (default) — price all three variants (and every
+  power-of-two ``block_size``) with the exact Toffoli model below and
+  take the cheapest; ties prefer ``"select"`` (fewest ancillas), then
+  ``"select_copy"`` over ``"select_swap"`` (no routing-CNOT storm).
 
 Toffoli accounting (documented contract, pinned by the resource tests;
 ``W(n, m)`` is the fused walk count from
@@ -39,22 +61,53 @@ on full uncontrolled trees):
   binary routing network is ``B - 1`` register swaps per direction, and
   both the routing and the block writes run twice (compute + unitary
   uncompute).
+- ``"select_copy"``: ``2 * W(address_bits - log2(B), ceil(len(data)/B))
+  + W(log2(B), B) + output_bits * (B - 1)``. The two block-index walks
+  are unchanged; the middle is one low-address walk plus one Toffoli per
+  copied bit per non-zero block (block 0 rides the free direct write).
+
+Against select_swap at the same block size, select_copy trades the
+``2 b (B - 1)`` routing Toffolis for ``b (B - 1) + W(log2(B), B)`` — the
+per-bit routing term is exactly halved, which is `arXiv:2605.20334`'s
+half-cost claim for the multiplexed copy (in the paper's
+measured-uncompute accounting the copy's own iterator costs ``B - 3``,
+so the copy wins there for every ``b``). In this library's unitary
+accounting the copy's iterator is the coherent walk,
+``W(log2(B), B) = 3B/2 - 5`` for ``B >= 8``, so select_copy is strictly
+cheaper than select_swap whenever ``W(log2(B), B) < output_bits *
+(B - 1)`` — always for ``output_bits >= 2``, and for ``output_bits = 1``
+only below ``B = 8`` (tie at 8): single-bit tables with large optimal
+blocks are the one regime select_swap still wins, which is why all
+three variants stay priced under ``"auto"``.
 
 The papers' headline counts (``N - 1`` lookup Toffolis for SELECT,
 ``ceil(N/B) + output_bits * (B - 1)`` for QROAM) price ancilla
-uncomputation at zero via measurement-and-fixup. These primitives stay
-strictly unitary (house rules: statevector-testable, inverse-composable,
-no mid-circuit measurement), so the coherent counts above are what the
-minted kernels actually cost; the default ``block_size`` optimizes the
-coherent model (``~ sqrt(3 N / (2 output_bits))`` rather than the
-papers' ``~ sqrt(N / output_bits)``).
+uncomputation at zero via measurement-and-fixup, and `arXiv:2605.20334`
+additionally borrows *dirty* ancillas and restores them by measurement.
+These primitives stay strictly unitary on clean ancillas (house rules:
+statevector-testable, inverse-composable, no mid-circuit measurement),
+so the coherent counts above are what the minted kernels actually cost;
+the default ``block_size`` optimizes the coherent model
+(``~ sqrt(3 N / (2 output_bits))`` for select_swap,
+``~ sqrt(6 N / (2 output_bits + 3))`` for select_copy, rather than the
+papers' ``~ sqrt(N / output_bits)``). The paper's Sections II.C/II.D
+(sequential-QROM fusion and single-bit packets, the ``(1 + 1/b) N/B``
+prefactor) lean on the dirty-register/measured-restore machinery and are
+deliberately out of scope here — see the SelectCopy record in
+``PLAN_primitives_promotion.md``.
 
-Both variants are exactly their own inverse: the write phase is X-only,
-so the ``"select"`` walk XORs the same table twice, and the
+All variants are exactly their own inverse: the write phase is X-only,
+so the ``"select"`` walk XORs the same table twice, the
 ``"select_swap"`` sandwich ``U = W S C S^-1 W`` squares to identity
 (``W`` and ``C`` are involutions and the copy commutes with itself
-through the routing). Apply ``kernel()`` again to uncompute; the
-property is pinned by ``tests/python/test_primitives_qrom.py``.
+through the routing), and the ``"select_copy"`` sandwich
+``U = W1 C W2`` does too: ``W2 W1 = D`` (the leaf-controlled direct
+write of block entry 0 into the output — walks over commuting X-only
+bodies factor), ``C`` and ``D`` commute (both X-target the output;
+neither touches the other's controls), and ``C``, ``D``, ``W1``,
+``W2`` are involutions, so ``U^2 = W1 C D C W2 = W1 D W2 = W1 W1 = I``.
+Apply ``kernel()`` again to uncompute; the property is pinned by
+``tests/python/test_primitives_qrom.py``.
 """
 
 from __future__ import annotations
@@ -62,15 +115,17 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from ._unary_iteration import (_OP_BODY_X, _OP_CCX, _OP_CCX_ADDR_ADDR,
-                               _OP_CCX_CTRL, _OP_CX_ADDR_ADDR,
-                               _OP_CX_ADDR_LADDER, _OP_CX_LADDER_LADDER,
-                               _OP_CX_LADDER_TARGET, _OP_X_ADDR,
-                               _TOFFOLI_OPCODES, _emit_walk, _mint_interpreter,
-                               _walk_toffoli_count, unary_iteration_kernels)
+                               _OP_CCX_CTRL, _OP_CCX_LADDER_LADDER_TARGET,
+                               _OP_CX_ADDR_ADDR, _OP_CX_ADDR_LADDER,
+                               _OP_CX_LADDER_LADDER, _OP_CX_LADDER_TARGET,
+                               _OP_X_ADDR, _TOFFOLI_OPCODES, _emit_walk,
+                               _mint_interpreter, _walk_toffoli_count,
+                               unary_iteration_kernels)
 
 __all__ = ["QROM"]
 
-_VARIANTS = ("auto", "select", "select_swap")
+_VARIANTS = ("auto", "select", "select_swap", "select_copy")
+_BLOCK_VARIANTS = ("select_swap", "select_copy")
 
 # Walk opcodes whose (a, b) operands index the address register, used to
 # shift the block-index walk onto the high address bits.
@@ -93,6 +148,17 @@ def _select_swap_cost(address_bits: int, num_entries: int, output_bits: int,
             (block_size - 1))
 
 
+def _select_copy_cost(address_bits: int, num_entries: int, output_bits: int,
+                      block_size: int) -> int:
+    """Documented Toffoli price of the select_copy variant."""
+    low_bits = block_size.bit_length() - 1
+    high_bits = address_bits - low_bits
+    num_blocks = -(-num_entries // block_size)
+    return (2 * _walk_toffoli_count(high_bits, num_blocks) +
+            _walk_toffoli_count(low_bits, block_size) + output_bits *
+            (block_size - 1))
+
+
 class QROM:
     """Coherent lookup of a classical integer table (see module docstring).
 
@@ -106,13 +172,15 @@ class QROM:
     output_bits
         Output register width.
     variant
-        ``"auto"`` (default), ``"select"`` or ``"select_swap"`` — see the
-        module docstring for the constructions and their exact prices.
+        ``"auto"`` (default), ``"select"``, ``"select_swap"`` or
+        ``"select_copy"`` — see the module docstring for the
+        constructions and their exact prices.
     block_size
-        SELECT-SWAP block size: a power of two in
+        SELECT-SWAP / SELECT-COPY block size: a power of two in
         ``[2, 2^(address_bits - 1)]``. Only valid with
-        ``variant="select_swap"``; ``None`` there picks the power of two
-        minimizing the documented Toffoli count.
+        ``variant="select_swap"`` or ``variant="select_copy"``; ``None``
+        there picks the power of two minimizing the documented Toffoli
+        count.
 
     The three views of the minted kernel may live anywhere (no contiguity
     requirement between them), which is what lets callers weave the QROM
@@ -153,10 +221,10 @@ class QROM:
             raise ValueError(
                 f"variant must be one of {_VARIANTS}, got {variant!r}")
         if block_size is not None:
-            if variant != "select_swap":
+            if variant not in _BLOCK_VARIANTS:
                 raise ValueError(
-                    "block_size is only valid with variant='select_swap', "
-                    f"got variant={variant!r}")
+                    "block_size is only valid with variant='select_swap' or "
+                    f"variant='select_copy', got variant={variant!r}")
             if (int(block_size) != block_size or block_size < 2
                     or block_size & (block_size - 1) != 0):
                 raise ValueError("block_size must be a power of two >= 2, got "
@@ -169,26 +237,30 @@ class QROM:
                     f"{1 << (address_bits - 1)}")
 
         select_cost = _walk_toffoli_count(address_bits, len(entries))
-        swap_candidates = [1 << s for s in range(1, address_bits)
-                           ] if block_size is None else [block_size]
-        swap_costs = {
-            size: _select_swap_cost(address_bits, len(entries), output_bits,
-                                    size)
-            for size in swap_candidates
+        block_candidates = [1 << s for s in range(1, address_bits)
+                            ] if block_size is None else [block_size]
+        cost_models = {
+            "select_swap": _select_swap_cost,
+            "select_copy": _select_copy_cost
+        }
+        block_costs = {
+            name: {
+                size: model(address_bits, len(entries), output_bits, size)
+                for size in block_candidates
+            }
+            for name, model in cost_models.items()
         }
         if variant == "auto":
-            best_size = min(swap_costs,
-                            key=lambda size: (swap_costs[size], size),
-                            default=None)
-            if best_size is None or select_cost <= swap_costs[best_size]:
-                variant = "select"
-                block_size = None
-            else:
-                variant = "select_swap"
-                block_size = best_size
-        elif variant == "select_swap":
-            block_size = min(swap_costs,
-                             key=lambda size: (swap_costs[size], size))
+            # Ties: fewest-ancilla select first, then select_copy over
+            # select_swap (no routing-CNOT storm), then smaller blocks.
+            candidates = [(select_cost, 0, 0, "select", None)]
+            for rank, name in ((1, "select_copy"), (2, "select_swap")):
+                candidates.extend((cost, rank, size, name, size)
+                                  for size, cost in block_costs[name].items())
+            _, _, _, variant, block_size = min(candidates)
+        elif variant in _BLOCK_VARIANTS:
+            costs = block_costs[variant]
+            block_size = min(costs, key=lambda size: (costs[size], size))
 
         self._data = tuple(entries)
         self._num_address = address_bits
@@ -197,8 +269,10 @@ class QROM:
         self._block_size = block_size
         if variant == "select":
             self._build_select()
-        else:
+        elif variant == "select_swap":
             self._build_select_swap()
+        else:
+            self._build_select_copy()
 
     def _build_select(self) -> None:
         entries = self._data
@@ -277,6 +351,81 @@ class QROM:
         self._num_ladder = high_bits + size * b
         self._toffoli_count = sum(1 for op in ops if op[0] in _TOFFOLI_OPCODES)
 
+    def _build_select_copy(self) -> None:
+        entries = self._data
+        b = self._output_bits
+        size = self._block_size
+        low_bits = size.bit_length() - 1
+        high_bits = self._num_address - low_bits
+        num_blocks = -(-len(entries) // size)
+        # The block-index and low-address walks run sequentially and both
+        # restore their ladder lines, so they share one line pool; the
+        # B - 1 block registers (block 0 rides the direct output write)
+        # sit after it.
+        pool = max(high_bits, low_bits)
+
+        def block_write(j: int) -> list[tuple[str, int]]:
+            # Tokens < b are direct output writes (entry (j, 0)); token
+            # b + (i - 1) * b + t is bit t of block register i - 1,
+            # holding data[j, i] XOR data[j, 0] (arXiv:2605.20334's Sel1).
+            base = entries[j * size] if j * size < len(entries) else 0
+            gates = [("x", t) for t in range(b) if (base >> t) & 1]
+            for i in range(1, size):
+                k = j * size + i
+                word = (entries[k] if k < len(entries) else 0) ^ base
+                gates.extend(
+                    ("x", i * b + t) for t in range(b) if (word >> t) & 1)
+            return gates
+
+        # Rebase the block-index walk exactly as select_swap does (walk
+        # lines lead the ladder view, block-index address wires sit above
+        # the low bits); direct output writes stay leaf-controlled body
+        # X's, register writes become ladder-to-ladder CNOTs.
+        write_ops = []
+        unwrite_ops = []
+        for op in _emit_walk(high_bits, num_blocks, False, block_write):
+            opcode, a, bb, c = op
+            if opcode == _OP_BODY_X:
+                if bb < b:
+                    write_ops.append((_OP_BODY_X, a, bb, 0))
+                else:
+                    reg = (_OP_CX_LADDER_LADDER, a, pool + bb - b, 0)
+                    write_ops.append(reg)
+                    unwrite_ops.append(reg)
+                continue
+            operands = [a, bb, c]
+            for position in _ADDRESS_OPERANDS.get(opcode, ()):
+                operands[position] += low_bits
+            write_ops.append((opcode, *operands))
+            unwrite_ops.append((opcode, *operands))
+
+        # The multiplexed copy: one walk over the low address bits (its
+        # wires are address[0 .. low_bits) already — no rebase) whose
+        # body at r >= 1 Toffoli-copies block register r - 1 into the
+        # output; the r = 0 body is empty (the direct write covered it).
+        def copy_body(r: int) -> list[tuple[str, int]]:
+            if r == 0:
+                return []
+            return [("x", (r - 1) * b + t) for t in range(b)]
+
+        copy_ops = []
+        for op in _emit_walk(low_bits, size, False, copy_body):
+            opcode, a, bb, c = op
+            if opcode == _OP_BODY_X:
+                copy_ops.append(
+                    (_OP_CCX_LADDER_LADDER_TARGET, a, pool + bb, bb % b))
+            else:
+                copy_ops.append(op)
+
+        # W1 C W2: write (blocks XOR'd against entry 0, entry 0 straight
+        # to the output), one multiplexed copy, unwrite the registers —
+        # clean ancillas and an exactly self-inverse lookup (see the
+        # module docstring for the W1 C W2 involution argument).
+        ops = write_ops + copy_ops + unwrite_ops
+        self._kernel = _mint_interpreter(ops, controlled=False, has_work=False)
+        self._num_ladder = pool + (size - 1) * b
+        self._toffoli_count = sum(1 for op in ops if op[0] in _TOFFOLI_OPCODES)
+
     @property
     def data(self) -> tuple[int, ...]:
         return self._data
@@ -291,7 +440,9 @@ class QROM:
 
         ``address_bits`` walk lines for ``"select"``; walk lines plus the
         ``block_size * output_bits`` block registers for
-        ``"select_swap"``.
+        ``"select_swap"``; a ``max(high_bits, log2(block_size))`` shared
+        walk-line pool plus ``(block_size - 1) * output_bits`` block
+        registers for ``"select_copy"``.
         """
         return self._num_ladder
 
@@ -301,12 +452,12 @@ class QROM:
 
     @property
     def variant(self) -> str:
-        """The construction actually minted: 'select' or 'select_swap'."""
+        """The minted construction: 'select', 'select_swap' or 'select_copy'."""
         return self._variant
 
     @property
     def block_size(self) -> int | None:
-        """SELECT-SWAP block size (``None`` for the select variant)."""
+        """SELECT-SWAP / SELECT-COPY block size (``None`` for select)."""
         return self._block_size
 
     @property
