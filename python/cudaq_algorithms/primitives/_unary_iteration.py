@@ -182,6 +182,7 @@ _OP_Z_LADDER = 17  # z(ladder[a])
 _OP_CX_ADDR_ADDR = 18  # cx(address[a], address[b])
 _OP_CCX_ADDR_ADDR = 19  # x.ctrl(address[a], address[b], ladder[c])
 _OP_CX_LADDER_TARGET = 20  # cx(ladder[a], target[b])
+_OP_CCX_LADDER_LADDER_TARGET = 21  # x.ctrl(ladder[a], ladder[b], target[c])
 
 _BODY_OPCODES = {"x": _OP_BODY_X, "y": _OP_BODY_Y, "z": _OP_BODY_Z}
 
@@ -201,7 +202,8 @@ _EXTENDED_BODY_GATES = {
 }
 
 _TOFFOLI_OPCODES = (_OP_CCX, _OP_CCX_CTRL, _OP_AND_TT, _OP_AND_WT,
-                    _OP_BODY_X_W, _OP_CCX_ADDR_ADDR)
+                    _OP_BODY_X_W, _OP_CCX_ADDR_ADDR,
+                    _OP_CCX_LADDER_LADDER_TARGET)
 
 # Opcode -> operand positions (within (a, b, c)) that index the work
 # register, used to infer the required work width from the emitted ops.
@@ -215,28 +217,50 @@ _WORK_OPERANDS = {
 
 # Human-readable templates for describe(); {a}/{b}/{c} are the operands.
 _OP_DESCRIPTIONS = {
-    _OP_X_ADDR: "x(address[{a}])",
-    _OP_X_LADDER: "x(ladder[{a}])",
-    _OP_CX_ADDR_LADDER: "cx(address[{a}] -> ladder[{b}])",
-    _OP_CX_LADDER_LADDER: "cx(ladder[{a}] -> ladder[{b}])",
-    _OP_CCX: "ccx(ladder[{a}], address[{b}] -> ladder[{c}])  # Toffoli",
-    _OP_BODY_X: "x(target[{b}]) ctrl ladder[{a}]",
-    _OP_BODY_Y: "y(target[{b}]) ctrl ladder[{a}]",
-    _OP_BODY_Z: "z(target[{b}]) ctrl ladder[{a}]",
-    _OP_CX_CTRL_LADDER: "cx(control[0] -> ladder[{b}])",
-    _OP_CCX_CTRL: "ccx(control[0], address[{b}] -> ladder[{c}])  # Toffoli",
-    _OP_FREE_X: "x(target[{a}])",
-    _OP_FREE_CX: "cx(target[{a}] -> target[{b}])",
-    _OP_AND_TT: "ccx(target[{a}], target[{b}] -> work[{c}])  # Toffoli",
-    _OP_AND_WT: "ccx(work[{a}], target[{b}] -> work[{c}])  # Toffoli",
-    _OP_COPY_TW: "cx(target[{a}] -> work[{b}])",
-    _OP_BODY_X_W: "x(target[{c}]) ctrl ladder[{a}], work[{b}]  # Toffoli",
-    _OP_BODY_Z_W: "z(work[{b}]) ctrl ladder[{a}]",
-    _OP_Z_LADDER: "z(ladder[{a}])",
-    _OP_CX_ADDR_ADDR: "cx(address[{a}] -> address[{b}])",
+    _OP_X_ADDR:
+    "x(address[{a}])",
+    _OP_X_LADDER:
+    "x(ladder[{a}])",
+    _OP_CX_ADDR_LADDER:
+    "cx(address[{a}] -> ladder[{b}])",
+    _OP_CX_LADDER_LADDER:
+    "cx(ladder[{a}] -> ladder[{b}])",
+    _OP_CCX:
+    "ccx(ladder[{a}], address[{b}] -> ladder[{c}])  # Toffoli",
+    _OP_BODY_X:
+    "x(target[{b}]) ctrl ladder[{a}]",
+    _OP_BODY_Y:
+    "y(target[{b}]) ctrl ladder[{a}]",
+    _OP_BODY_Z:
+    "z(target[{b}]) ctrl ladder[{a}]",
+    _OP_CX_CTRL_LADDER:
+    "cx(control[0] -> ladder[{b}])",
+    _OP_CCX_CTRL:
+    "ccx(control[0], address[{b}] -> ladder[{c}])  # Toffoli",
+    _OP_FREE_X:
+    "x(target[{a}])",
+    _OP_FREE_CX:
+    "cx(target[{a}] -> target[{b}])",
+    _OP_AND_TT:
+    "ccx(target[{a}], target[{b}] -> work[{c}])  # Toffoli",
+    _OP_AND_WT:
+    "ccx(work[{a}], target[{b}] -> work[{c}])  # Toffoli",
+    _OP_COPY_TW:
+    "cx(target[{a}] -> work[{b}])",
+    _OP_BODY_X_W:
+    "x(target[{c}]) ctrl ladder[{a}], work[{b}]  # Toffoli",
+    _OP_BODY_Z_W:
+    "z(work[{b}]) ctrl ladder[{a}]",
+    _OP_Z_LADDER:
+    "z(ladder[{a}])",
+    _OP_CX_ADDR_ADDR:
+    "cx(address[{a}] -> address[{b}])",
     _OP_CCX_ADDR_ADDR:
     "ccx(address[{a}], address[{b}] -> ladder[{c}])  # Toffoli",
-    _OP_CX_LADDER_TARGET: "cx(ladder[{a}] -> target[{b}])",
+    _OP_CX_LADDER_TARGET:
+    "cx(ladder[{a}] -> target[{b}])",
+    _OP_CCX_LADDER_LADDER_TARGET:
+    "ccx(ladder[{a}], ladder[{b}] -> target[{c}])  # Toffoli",
 }
 
 
@@ -608,6 +632,8 @@ def _mint_interpreter(ops: list, controlled: bool, has_work: bool):
                     x.ctrl(address[a], address[b], ladder[c])
                 if op == 20:
                     cx(ladder[a], target[b])
+                if op == 21:
+                    x.ctrl(ladder[a], ladder[b], target[c])
 
         _retain(primitives_unary_walk_work_ctrl)
         return primitives_unary_walk_work_ctrl
@@ -661,6 +687,8 @@ def _mint_interpreter(ops: list, controlled: bool, has_work: bool):
                     x.ctrl(address[a], address[b], ladder[c])
                 if op == 20:
                     cx(ladder[a], target[b])
+                if op == 21:
+                    x.ctrl(ladder[a], ladder[b], target[c])
 
         _retain(primitives_unary_walk_work)
         return primitives_unary_walk_work
@@ -709,6 +737,8 @@ def _mint_interpreter(ops: list, controlled: bool, has_work: bool):
                     x.ctrl(address[a], address[b], ladder[c])
                 if op == 20:
                     cx(ladder[a], target[b])
+                if op == 21:
+                    x.ctrl(ladder[a], ladder[b], target[c])
 
         _retain(primitives_unary_walk_ctrl)
         return primitives_unary_walk_ctrl
@@ -749,6 +779,8 @@ def _mint_interpreter(ops: list, controlled: bool, has_work: bool):
                 x.ctrl(address[a], address[b], ladder[c])
             if op == 20:
                 cx(ladder[a], target[b])
+            if op == 21:
+                x.ctrl(ladder[a], ladder[b], target[c])
 
     _retain(primitives_unary_walk)
     return primitives_unary_walk

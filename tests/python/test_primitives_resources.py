@@ -144,7 +144,10 @@ def test_partial_tree_costs_no_more_than_full():
 
 @pytest.mark.parametrize("variant,block_size", [("select", None),
                                                 ("select_swap", 2),
-                                                ("select_swap", 4)])
+                                                ("select_swap", 4),
+                                                ("select_copy", 2),
+                                                ("select_copy", 4),
+                                                ("select_copy", 8)])
 def test_qrom_compiled_toffolis_match_emitter_count(variant, block_size):
     data = [3, 0, 5, 6, 1, 7, 2, 2, 4, 1, 6]
     qrom = QROM(data,
@@ -179,17 +182,89 @@ def test_qrom_select_swap_cost_matches_documented_formula():
         assert compiled == expected
 
 
+def test_qrom_select_copy_cost_matches_documented_formula():
+    # Documented contract: 2 W(high_bits, num_blocks) + W(log2(B), B)
+    # + b (B - 1) — the two block-index walks, the one multiplexed-copy
+    # walk over the low address bits, and one Toffoli per copied bit per
+    # non-zero block (block 0 rides the free direct write,
+    # arXiv:2605.20334 Sec. II.B).
+    data = [int(v) % 4 for v in range(32)]
+    for block_size in (2, 4, 8):
+        qrom = QROM(data,
+                    address_bits=5,
+                    output_bits=2,
+                    variant="select_copy",
+                    block_size=block_size)
+        low_bits = block_size.bit_length() - 1
+        num_blocks = -(-len(data) // block_size)
+        expected = (2 * _walk_toffoli_count(5 - low_bits, num_blocks) +
+                    _walk_toffoli_count(low_bits, block_size) + 2 *
+                    (block_size - 1))
+        assert qrom.toffoli_count == expected
+        compiled = _compiled_toffolis_of(qrom.kernel(), qrom.num_address,
+                                         qrom.num_ladder, qrom.num_output)
+        assert compiled == expected
+
+
+def test_qrom_select_copy_beats_select_swap_by_the_derived_margin():
+    # At the same (N, b, B) the copy replaces the 2 b (B - 1) routing
+    # Toffolis with b (B - 1) + W(log2(B), B): the saving is exactly
+    # b (B - 1) - W(log2(B), B) — positive for every b >= 2 (and for
+    # b = 1 below B = 8; at b = 1, B = 8 the two tie, the one regime
+    # select_swap can still win under the coherent walk accounting).
+    data = [int(v) % 4 for v in range(32)]
+    for block_size in (2, 4, 8):
+        copy = QROM(data, 5, 2, variant="select_copy", block_size=block_size)
+        swap = QROM(data, 5, 2, variant="select_swap", block_size=block_size)
+        low_bits = block_size.bit_length() - 1
+        margin = 2 * (block_size - 1) - _walk_toffoli_count(
+            low_bits, block_size)
+        assert margin > 0
+        assert swap.toffoli_count - copy.toffoli_count == margin
+    # The b = 1 boundary: tie at B = 8, select_swap ahead at B = 16.
+    ones = [int(v) % 2 for v in range(32)]
+    tie_copy = QROM(ones, 5, 1, variant="select_copy", block_size=8)
+    tie_swap = QROM(ones, 5, 1, variant="select_swap", block_size=8)
+    assert tie_copy.toffoli_count == tie_swap.toffoli_count
+    wide = [int(v) % 2 for v in range(64)]
+    over_copy = QROM(wide, 6, 1, variant="select_copy", block_size=16)
+    over_swap = QROM(wide, 6, 1, variant="select_swap", block_size=16)
+    assert over_swap.toffoli_count < over_copy.toffoli_count
+
+
 def test_qrom_auto_picks_the_cheaper_side_of_the_crossover():
-    # Above the crossover (large table, narrow output) select_swap must
-    # win and beat the plain walk...
+    # Above the crossover (large table, narrow output) a blocked variant
+    # must win and beat the plain walk; at b = 1, N = 64 select_copy and
+    # select_swap tie and the tie-break prefers select_copy.
     data = [int(v) % 2 for v in range(64)]
     auto = QROM(data, 6, 1)
     select = QROM(data, 6, 1, variant="select")
-    assert auto.variant == "select_swap"
+    assert auto.variant == "select_copy"
     assert auto.toffoli_count < select.toffoli_count
-    # ...and below it (small table, wide output) the plain walk wins.
+    assert auto.toffoli_count == QROM(data, 6, 1,
+                                      variant="select_swap").toffoli_count
+    # Multi-bit outputs: select_copy is strictly cheapest (halved
+    # routing), so auto must pick it over both alternatives.
+    data = [int(v) % 4 for v in range(64)]
+    auto = QROM(data, 6, 2)
+    assert auto.variant == "select_copy"
+    assert auto.toffoli_count < QROM(data, 6, 2,
+                                     variant="select_swap").toffoli_count
+    assert auto.toffoli_count < QROM(data, 6, 2,
+                                     variant="select").toffoli_count
+    # Single-bit output, larger table: the copy walk overhead outgrows
+    # the halved routing and select_swap is strictly cheapest.
+    data = [int(v) % 2 for v in range(128)]
+    auto = QROM(data, 7, 1)
+    assert auto.variant == "select_swap"
+    assert auto.toffoli_count < QROM(data, 7, 1,
+                                     variant="select_copy").toffoli_count
+    # ...and below the crossover (small table, wide output) the plain
+    # walk wins.
     data = [200, 3, 118, 25]
     auto = QROM(data, 2, 8)
-    swapped = QROM(data, 2, 8, variant="select_swap")
     assert auto.variant == "select"
-    assert auto.toffoli_count < swapped.toffoli_count
+    assert auto.toffoli_count < QROM(data, 2, 8,
+                                     variant="select_swap").toffoli_count
+    assert auto.toffoli_count < QROM(data, 2, 8,
+                                     variant="select_copy").toffoli_count
