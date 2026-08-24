@@ -103,8 +103,11 @@ def _retain(*kernels) -> None:
 # x(ladder[a]) resets the line to |0> and the CZ repairs the phase kick
 # against the same two inputs the AND was computed from (any needed
 # X-conjugation of the address wire is emitted around the gadget).
-_OP_MEAS_UNCOMPUTE = 21  # ... fixup z.ctrl(ladder[b], address[c])
-_OP_MEAS_UNCOMPUTE_CTRL = 22  # ... fixup z.ctrl(control[0], address[c])
+# Numbered ABOVE every base-interpreter opcode (base tops out at 21,
+# _OP_CCX_LADDER_LADDER_TARGET) so the shared describe() dictionary
+# never aliases a base instruction.
+_OP_MEAS_UNCOMPUTE = 22  # ... fixup z.ctrl(ladder[b], address[c])
+_OP_MEAS_UNCOMPUTE_CTRL = 23  # ... fixup z.ctrl(control[0], address[c])
 
 _MEASURED_OPCODES = (_OP_MEAS_UNCOMPUTE, _OP_MEAS_UNCOMPUTE_CTRL)
 
@@ -503,13 +506,13 @@ def _mint_measured_interpreter(ops: list, controlled: bool, has_work: bool):
                     z.ctrl(ladder[a], work[b])
                 if op == 17:
                     z(ladder[a])
-                if op == 21:
+                if op == 22:
                     h(ladder[a])
                     fired = mz(ladder[a])
                     if fired:
                         x(ladder[a])
                         z.ctrl(ladder[b], address[c])
-                if op == 22:
+                if op == 23:
                     h(ladder[a])
                     fired = mz(ladder[a])
                     if fired:
@@ -562,7 +565,7 @@ def _mint_measured_interpreter(ops: list, controlled: bool, has_work: bool):
                     z.ctrl(ladder[a], work[b])
                 if op == 17:
                     z(ladder[a])
-                if op == 21:
+                if op == 22:
                     h(ladder[a])
                     fired = mz(ladder[a])
                     if fired:
@@ -609,13 +612,13 @@ def _mint_measured_interpreter(ops: list, controlled: bool, has_work: bool):
                     cx(target[a], target[b])
                 if op == 17:
                     z(ladder[a])
-                if op == 21:
+                if op == 22:
                     h(ladder[a])
                     fired = mz(ladder[a])
                     if fired:
                         x(ladder[a])
                         z.ctrl(ladder[b], address[c])
-                if op == 22:
+                if op == 23:
                     h(ladder[a])
                     fired = mz(ladder[a])
                     if fired:
@@ -656,7 +659,7 @@ def _mint_measured_interpreter(ops: list, controlled: bool, has_work: bool):
                 cx(target[a], target[b])
             if op == 17:
                 z(ladder[a])
-            if op == 21:
+            if op == 22:
                 h(ladder[a])
                 fired = mz(ladder[a])
                 if fired:
