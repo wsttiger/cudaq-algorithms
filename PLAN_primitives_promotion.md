@@ -334,3 +334,68 @@ Caveat: the measured walk's Toffolis are all compute-from-|0> ANDs
 Verified: statevector equality with the coherent walk to 1e-12 on
 superposed address x target (x control) inputs, repeated runs, full and
 partial trees; walk . adj identity likewise.
+
+## P1 promotion record (branches `features/primitives_arithmetic` + `features/primitives_alias_sampling`)
+
+Two stacked branches promote the sparse branch's M1/M2 P1 modules into
+`cudaq_algorithms.primitives`; the sparse branch deletes its copies of
+`_arithmetic.py` and `_alias_sampling.py` (and their tests) at rebase and
+re-imports from the primitives subpackage.
+
+### `features/primitives_arithmetic` — `_arithmetic.py`
+
+- Ported verbatim (public surface and semantics unchanged): the
+  CDKM/Cuccaro ripple-carry family (`add_register` / `subtract_register`,
+  `add_constant` / `subtract_constant`, `cmp_ge_constant`) and the Draper
+  QFT family (`qft` / `iqft`, `phase_add_constant`, `add_constant_qft` /
+  `subtract_constant_qft`, `cmp_ge_constant_qft` /
+  `cmp_ge_constant_qft_adj`). Docstrings rewritten for the new home and
+  now state the gate-price contracts. All names exported from
+  `primitives/__init__.py`.
+- Exhaustive tests ported (`tests/python/test_primitives_arithmetic.py`:
+  superposition harness over all inputs, widths <= 5, op-then-inverse
+  identities) and NEW compiler-pinned resource contracts added
+  (skipif-gated on `cudaq.estimate_resources`):
+  - CDKM: exactly `2 n` Toffolis for every operation on `n`-bit
+    registers (`n` MAJ + `n` UMA; the constant load is X-only free;
+    `cmp_ge_constant` is MAJ sweep + literal reversal; `K = 0` costs 0).
+    Doubling linearity pinned via `cost(2n) == 2 cost(n)`.
+  - Draper QFT: zero Toffolis; rotation budgets pinned exactly —
+    `add_constant_qft(n)`: `n (n - 1)` controlled-`r1`, `n` free `r1`,
+    `2 n` H; each `cmp_ge_constant_qft` side: `n (n + 1)`
+    controlled-`r1`, `n + 1` free `r1`, `2 (n + 1)` H (`K >= 1`).
+  - Pinning caveat: resource harnesses pass constants as *runtime kernel
+    arguments* — source-literal constants let the compiler fold and the
+    rotation split (cr1 vs r1) changes.
+
+### `features/primitives_alias_sampling` — `_alias_sampling.py`
+
+- `AliasSamplingPrepare` ported with the exactness philosophy intact
+  (integer Vose preprocessing; realized marginal EXACTLY
+  `table_probabilities`; `discretization_bound = 1.5 / (K 2^mu)`), the
+  hand-written adjoint, and the PREPARE-with-garbage contract documented
+  loudly. Kernel names re-minted primitives-unique
+  (`primitives_alias_prepare[_adj]`, retained in the
+  `_unary_iteration` keep-alive registry).
+- Adaptation forced by the new QROM: the lookup is now the variants QROM
+  under `variant="auto"` (select / select_swap / select_copy priced, the
+  cheapest minted), so the ladder slice inside the garbage register is
+  `qrom.num_ladder` wide instead of the seed's hardwired `num_index`.
+  Layout is otherwise the M2 weave: `[alias(m) | keep(mu) | keep_pad |
+  ref(mu) | ref_pad | flag | ladder(qrom.num_ladder) | carry]`,
+  `num_garbage = m + 2 mu + 4 + qrom.num_ladder` (= the historical
+  `2m + 2mu + 4` whenever select wins the pricing — always at the table
+  sizes where alias tables are small). No variant is pinned: every QROM
+  variant restores its ladder and is self-inverse on the clean-ladder
+  sector, which is exactly what the adjoint's second lookup relies on
+  (ladder is |0> there). New `qrom` property exposes the priced lookup.
+- Tests ported (marginals vs brute-force branch enumeration, derived
+  discretization bound, prepare-then-adjoint identity, degenerate
+  weights, validation `match=` pins; register accounting generalized to
+  the variant-dependent layout) and NEW resource contracts added: each
+  of `kernel()` / `adjoint_kernel()` costs exactly
+  `qrom.toffoli_count + 4 (mu + 1)` Toffolis (the lookup at the QROM's
+  own reported price — asserted, not re-derived — plus two CDKM adders
+  on the `mu+1`-bit comparator extension) plus `num_index` Fredkins
+  (counted as `cswap` by `count_controls("swap", 1)`, not as `ccx`);
+  adjoint == forward gate-for-gate.
