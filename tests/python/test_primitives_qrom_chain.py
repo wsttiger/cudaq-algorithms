@@ -221,7 +221,10 @@ def _interleaved_state(kernel_list, num_ladder, thetas):
     return np.array(cudaq.get_state(run))
 
 
-@pytest.mark.parametrize("variant", ["auto", "select", "select_copy"])
+# "auto" is deliberately absent: its dispatch decision is pinned by the
+# factory tests, and each parametrization here retains ~1 GB of compiled
+# kernels for the life of the process (CI runners have 7 GB).
+@pytest.mark.parametrize("variant", ["select", "select_copy"])
 @pytest.mark.parametrize("fused", [True, False])
 def test_chain_matches_independent_qroms_with_interleaved_ops(fused, variant):
     # The semantics contract: chain fused == chain naive == m independent
@@ -290,67 +293,61 @@ def test_chain_prefix_readout_holds_each_table(fused, variant, block_size):
     total = shift + 3
     # One harness per prefix length applying that many step kernels
     # (explicit unrolled calls — kernels cannot be looped over inside a
-    # CUDA-Q kernel).
+    # CUDA-Q kernel). The address is a RUNTIME ARGUMENT: a closure-baked
+    # address would mint (and retain, compiled) a fresh kernel per
+    # address — 8x the JIT memory for identical circuits.
     k0, k1, k2, k3 = kernels
 
+    @cudaq.kernel
+    def run1(address: int):
+        address_reg = cudaq.qvector(3)
+        ladder = cudaq.qvector(num_ladder)
+        output = cudaq.qvector(3)
+        for b in range(3):
+            if ((address >> b) & 1) == 1:
+                x(address_reg[b])
+        k0(address_reg, ladder, output)
+
+    @cudaq.kernel
+    def run2(address: int):
+        address_reg = cudaq.qvector(3)
+        ladder = cudaq.qvector(num_ladder)
+        output = cudaq.qvector(3)
+        for b in range(3):
+            if ((address >> b) & 1) == 1:
+                x(address_reg[b])
+        k0(address_reg, ladder, output)
+        k1(address_reg, ladder, output)
+
+    @cudaq.kernel
+    def run3(address: int):
+        address_reg = cudaq.qvector(3)
+        ladder = cudaq.qvector(num_ladder)
+        output = cudaq.qvector(3)
+        for b in range(3):
+            if ((address >> b) & 1) == 1:
+                x(address_reg[b])
+        k0(address_reg, ladder, output)
+        k1(address_reg, ladder, output)
+        k2(address_reg, ladder, output)
+
+    @cudaq.kernel
+    def run4(address: int):
+        address_reg = cudaq.qvector(3)
+        ladder = cudaq.qvector(num_ladder)
+        output = cudaq.qvector(3)
+        for b in range(3):
+            if ((address >> b) & 1) == 1:
+                x(address_reg[b])
+        k0(address_reg, ladder, output)
+        k1(address_reg, ladder, output)
+        k2(address_reg, ladder, output)
+        k3(address_reg, ladder, output)
+
+    prefix_kernels = {1: run1, 2: run2, 3: run3, 4: run4}
+
     def prefix_state(address, prefix):
-        if prefix == 1:
-
-            @cudaq.kernel
-            def run1():
-                address_reg = cudaq.qvector(3)
-                ladder = cudaq.qvector(num_ladder)
-                output = cudaq.qvector(3)
-                for b in range(3):
-                    if ((address >> b) & 1) == 1:
-                        x(address_reg[b])
-                k0(address_reg, ladder, output)
-
-            return np.array(cudaq.get_state(run1))
-        if prefix == 2:
-
-            @cudaq.kernel
-            def run2():
-                address_reg = cudaq.qvector(3)
-                ladder = cudaq.qvector(num_ladder)
-                output = cudaq.qvector(3)
-                for b in range(3):
-                    if ((address >> b) & 1) == 1:
-                        x(address_reg[b])
-                k0(address_reg, ladder, output)
-                k1(address_reg, ladder, output)
-
-            return np.array(cudaq.get_state(run2))
-        if prefix == 3:
-
-            @cudaq.kernel
-            def run3():
-                address_reg = cudaq.qvector(3)
-                ladder = cudaq.qvector(num_ladder)
-                output = cudaq.qvector(3)
-                for b in range(3):
-                    if ((address >> b) & 1) == 1:
-                        x(address_reg[b])
-                k0(address_reg, ladder, output)
-                k1(address_reg, ladder, output)
-                k2(address_reg, ladder, output)
-
-            return np.array(cudaq.get_state(run3))
-
-        @cudaq.kernel
-        def run4():
-            address_reg = cudaq.qvector(3)
-            ladder = cudaq.qvector(num_ladder)
-            output = cudaq.qvector(3)
-            for b in range(3):
-                if ((address >> b) & 1) == 1:
-                    x(address_reg[b])
-            k0(address_reg, ladder, output)
-            k1(address_reg, ladder, output)
-            k2(address_reg, ladder, output)
-            k3(address_reg, ladder, output)
-
-        return np.array(cudaq.get_state(run4))
+        return np.array(cudaq.get_state(prefix_kernels[prefix], address))
 
     for prefix in (1, 2, 3, 4):
         for address in range(8):
