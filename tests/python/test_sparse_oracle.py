@@ -475,3 +475,24 @@ def test_banded_validation_raises():
                        value_bits=4)
     with pytest.raises(ValueError, match="value_bits must be a positive"):
         banded_oracles([0], [1.0], num_system=2, value_bits=0)
+
+
+def test_walk_kernel_state_prep_injection():
+    # walk_kernel(1, state_prep=...) must equal -H/alpha applied to the
+    # prep's state, matching the state-argument variant's convention.
+    encoding = laplacian_encoding(2, 6)
+    scaled = banded_quantized_dense(LAPLACIAN_OFFSETS, LAPLACIAN_VALUES, 2, 6,
+                                    encoding.h) / encoding.alpha
+
+    @cudaq.kernel
+    def prep(qubits: cudaq.qview):
+        ry(0.9, qubits[0])
+        ry(0.3, qubits[1])
+
+    q0 = np.array([np.cos(0.45), np.sin(0.45)])
+    q1 = np.array([np.cos(0.15), np.sin(0.15)])
+    ket = np.kron(q1, q0)  # little-endian: qubits[0] is the LSB
+
+    out = np.array(cudaq.get_state(encoding.walk_kernel(1, state_prep=prep)))
+    block = out[:1 << encoding.num_system]
+    np.testing.assert_allclose(block, -scaled @ ket, atol=1e-10)

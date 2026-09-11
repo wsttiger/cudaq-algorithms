@@ -86,9 +86,9 @@ the block ancillas is not implementable on CUDA-Q today: qubits allocated
 inside a kernel are never deallocated mid-circuit, so per-step scratch
 allocation would grow the register with every walk step. Folding the
 scratch into the reflected ancilla register is *exactly* equivalent:
-scratch is deterministically ``|0>`` at every reflection point, and ``I - 2
-``|0>``<0|_(block+scratch)`` restricted to the scratch-``|0>`` subspace equals ``I
-- 2 ``|0>``<0|_block``. ``num_block_ancilla`` and ``num_scratch`` expose the
+scratch is deterministically ``|0>`` at every reflection point, and
+``I - 2|0><0|_(block+scratch)`` restricted to the scratch-``|0>`` subspace
+equals ``I - 2|0><0|_block``. ``num_block_ancilla`` and ``num_scratch`` expose the
 split for hardware-cost accounting.
 """
 
@@ -631,6 +631,9 @@ class SparseOracleEncoding:
 
         ``oracles`` describes a general real ``2^n x 2^n`` matrix ``A``
         (per-slot column permutations ``c(s, .)`` with explicit inverses;
+        the oracle kernels must be flat — through CUDA-Q 0.15 the dilation
+        wraps them in ``cudaq.control``, which rejects kernels that call
+        kernels, so ``qrom_oracles`` bundles cannot feed this path;
         the value convention of the module docstring, with ``o_val``
         writing *only* the angle and sign bits — the dilation supplies the
         ``upper`` bit itself, since row < column reduces to the halves

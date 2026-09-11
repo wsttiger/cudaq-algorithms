@@ -554,3 +554,26 @@ def test_wide_ancilla_even_moment_refuses_fast():
     assert encoding.num_ancilla > 20  # the pathological regime is real
     with pytest.raises(ValueError, match="walk_kernel"):
         qubitization.reflection_observable(encoding)
+
+
+def test_encode_kernel_state_prep_injection():
+    # The state_prep variant (self-allocating kernel running a prep
+    # callback) must act identically to the state-argument variant on the
+    # same input state.
+    entries = {(0, 1): 0.7, (1, 0): 0.7, (0, 0): -0.5, (2, 2): 0.3}
+    matrix = dense_from_entries(entries, 4)
+    encoding = SparseLCUEncoding(matrix, mu=3)
+
+    @cudaq.kernel
+    def prep(qubits: cudaq.qview):
+        ry(0.7, qubits[0])
+        ry(1.1, qubits[1])
+
+    q0 = np.array([np.cos(0.35), np.sin(0.35)])
+    q1 = np.array([np.cos(0.55), np.sin(0.55)])
+    ket = np.kron(q1, q0)  # little-endian: qubits[0] is the LSB
+
+    out = np.array(cudaq.get_state(encoding.encode_kernel(state_prep=prep)))
+    block = out[:1 << encoding.num_system] * encoding.alpha
+    quantized = discretized_dense(encoding)
+    np.testing.assert_allclose(block, quantized @ ket, atol=1e-10)
