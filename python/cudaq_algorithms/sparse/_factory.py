@@ -173,10 +173,12 @@ def encode_sparse(matrix,
     alpha_lcu = sum(term[3] for term in terms)
     num_index = max(1, (len(terms) - 1).bit_length())
     _, select_work = _bodies_and_work(terms, num_system)
-    # (2 * num_index + 2 * mu + 4) is AliasSamplingPrepare's num_garbage
-    # for the select-variant QROM (num_ladder == num_index), kept in
-    # lockstep with the variant="select" pinned in SparseLCUEncoding.
-    qubits_lcu = (num_system + num_index + (2 * num_index + 2 * mu + 4) +
+    # (2 * num_index + 2 * mu + 2) is AliasSamplingPrepare's num_garbage
+    # for the select-variant QROM (num_ladder == num_index) since the
+    # PREPARE conditional moved to the family register comparator (one
+    # carry qubit, no pad pair), kept in lockstep with the
+    # variant="select" pinned in SparseLCUEncoding.
+    qubits_lcu = (num_system + num_index + (2 * num_index + 2 * mu + 2) +
                   select_work)
     lcu_reason = None
     if len(terms) > max_terms:
