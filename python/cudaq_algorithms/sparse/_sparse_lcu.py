@@ -23,9 +23,9 @@ Over the upper triangle plus diagonal of the (real symmetric) input:
   the pair splits into two unitaries with the identity remainder carried
   with opposite signs and cancelled exactly::
 
-      T   = |i><j| + |j><i| + (I - |i><i| - |j><j|)   (transposition)
-      T'  = |i><j| + |j><i| - (I - |i><i| - |j><j|)
-      H_ij (|i><j| + |j><i|) = (H_ij / 2) T + (H_ij / 2) T'
+      T   = ``|i>``<j| + |j><i| + (I - ``|i>``<i| - |j><j|)   (transposition)
+      T'  = ``|i>``<j| + |j><i| - (I - ``|i>``<i| - |j><j|)
+      H_ij (``|i>``<j| + |j><i|) = (H_ij / 2) T + (H_ij / 2) T'
 
   Weight ``|H_ij| / 2`` each, so the pair — i.e. *both* matrix entries
   ``(i, j)`` and ``(j, i)`` — costs ``|H_ij|`` of one-norm: a factor 2
@@ -33,8 +33,8 @@ Over the upper triangle plus diagonal of the (real symmetric) input:
   cancellation is exact for the ideal weights; discretization rounds the
   two weights independently, so the residual identity leaks onto the
   diagonal at the (test-derived) per-bin discretization bound.
-- Diagonal entry ``i``: ``H_ii |i><i| = (H_ii / 2) I - (H_ii / 2) Z_i``
-  with the reflection ``Z_i = I - 2 |i><i|`` — weight ``|H_ii| / 2``
+- Diagonal entry ``i``: ``H_ii ``|i>``<i| = (H_ii / 2) I - (H_ii / 2) Z_i``
+  with the reflection ``Z_i = I - 2 ``|i>``<i|`` — weight ``|H_ii| / 2``
   each, ``|H_ii|`` per entry. Signs (including negative diagonals) ride
   on the SELECT branch as a leaf-line Z phase, never on the weights.
 
@@ -75,7 +75,7 @@ garbage(2m + 2 mu + 4) | select_work]``:
 Self-adjointness: every term unitary squares to the identity and SELECT
 is block-diagonal over the index, so ``SELECT^2 = I`` and ``U_A =
 P-dagger S P`` is exactly self-adjoint and involutory **on states whose
-ancilla register enters in |0...0>** — the domain every consumer
+ancilla register enters in ``|0...0>``** — the domain every consumer
 supplies, and the domain the involution test pins. It is NOT a global
 matrix identity: SELECT's unary-iteration walk is an involution only
 when its ladder enters clean, so composing ``U_A`` by hand on a dirty
@@ -119,7 +119,7 @@ __all__ = ["SparseLCUEncoding"]
 
 # Term kinds (the dense definitions live in the module docstring).
 _IDENTITY = "identity"
-_REFLECTION = "reflection"  # Z_i = I - 2|i><i|
+_REFLECTION = "reflection"  # Z_i = I - 2``|i>``<i|
 _TRANSPOSITION = "transposition"  # T
 _REFLECTED_TRANSPOSITION = "reflected_transposition"  # T' = T (2P - I)
 
@@ -243,7 +243,7 @@ def _pair_body(i: int, j: int, reflected: bool, sign: int,
 
 
 def _reflection_body(i: int, sign: int, num_system: int) -> list:
-    """SELECT body for ``Z_i = I - 2|i><i|`` (a -1 phase on |i> alone)."""
+    """SELECT body for ``Z_i = I - 2``|i>``<i|`` (a -1 phase on ``|i>`` alone)."""
     pre = [("free_x", t) for t in range(num_system) if not ((i >> t) & 1)]
     if num_system == 1:
         match_ops, core = [], [("z", 0)]
@@ -424,7 +424,7 @@ class SparseLCUEncoding:
             """Controlled U_A = PREPARE-dagger (controlled SELECT) PREPARE.
 
             Only the Hermitian middle factor carries the external control
-            (the uncontrolled PREPARE pair cancels at control |0>); the
+            (the uncontrolled PREPARE pair cancels at control ``|0>``); the
             control reaches SELECT as a one-qubit view, so no control set
             mixes a qview with a bare qubit, and PREPARE — which calls
             sub-kernels — never sits under a control variant.
@@ -490,7 +490,7 @@ class SparseLCUEncoding:
     def num_ancilla(self) -> int:
         """All ancillas: index + PREPARE garbage + SELECT work scratch.
 
-        The garbage and scratch are |0...0> at every reflection point (the
+        The garbage and scratch are ``|0...0>`` at every reflection point (the
         sandwiched frame), so reflecting over the full register equals the
         index-only reflection — the same folding argument as
         ``SparseOracleEncoding`` (CUDA-Q cannot deallocate mid-circuit).
@@ -510,7 +510,7 @@ class SparseLCUEncoding:
 
     @property
     def num_select_work(self) -> int:
-        """Clean AND-ladder scratch for SELECT (|0> at reflection points)."""
+        """Clean AND-ladder scratch for SELECT (``|0>`` at reflection points)."""
         return self._num_work
 
     @property
@@ -574,9 +574,9 @@ class SparseLCUEncoding:
 
         Without ``state_prep``: a ``@cudaq.kernel(state)`` allocating the
         system register from ``state`` and the ancilla register (in
-        |0...0>) after it. With ``state_prep`` (a ``(qubits: qview)``
+        ``|0...0>``) after it. With ``state_prep`` (a ``(qubits: qview)``
         kernel): a zero-argument kernel that allocates the system register
-        in |0...0>, runs ``state_prep`` on it, then applies the encoding.
+        in ``|0...0>``, runs ``state_prep`` on it, then applies the encoding.
         """
         apply_u = self._apply
         n_anc = self.num_ancilla

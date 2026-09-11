@@ -12,9 +12,11 @@ d)``, ``h >= max |H_ij|``).
 Construction (T . S . T-dagger)
 -------------------------------
 
-``U_A = T-dagger S T`` over the registers ``system(n)`` and ``ancilla =
-[slot(m) | flag_a | flag_b | dual(n) | value(value_bits) | sign | upper |
-work]``:
+``U_A = T-dagger S T`` over the registers ``system(n)`` and::
+
+    ancilla = [slot(m) | flag_a | flag_b | dual(n) | value(value_bits) |
+               sign | upper | work]
+
 
 - ``T``: diffusion (Hadamards) over the slot register; CNOT-copy of the
   system index into the dual register; ``o_loc`` in place on the dual;
@@ -32,7 +34,7 @@ work]``:
 and involutory — the property Walk's Chebyshev powers and QSVT's
 forward/adjoint step reuse of ``apply_kernel`` rely on. It also makes the
 controlled variants cheap: ``controlled-U_A = T-dagger (controlled-S) T``
-(the uncontrolled ``T`` pair cancels at control |0>), so user oracles
+(the uncontrolled ``T`` pair cancels at control ``|0>``), so user oracles
 never need controlled versions.
 
 Sign convention
@@ -45,7 +47,7 @@ bit (row < column), and the encoding applies ``+i`` / ``-i`` phases
 (controlled S / S-dagger) keyed on them; the bra- and ket-side phases then
 multiply to ``-1`` exactly for negative off-diagonal elements. Negative
 *diagonal* elements are not representable (the diagonal phase contribution
-is |chi|^2 = +1 for any convention); encode such operators via
+is ``|chi|^2`` = +1 for any convention); encode such operators via
 ``from_general_oracles`` (Hermitian dilation) or shift the diagonal.
 
 Oracle contract (``OracleKernels``)
@@ -67,7 +69,7 @@ index, i.e. after ``o_loc``): the ``value_bits``-bit fixed point of
 ``value_and_sign[0:value_bits]``, the sign bit into
 ``value_and_sign[value_bits]``, and the upper bit (row < column) into
 ``value_and_sign[value_bits + 1]``. ``work`` provides ``num_work`` scratch
-qubits that must be returned to |0>.
+qubits that must be returned to ``|0>``.
 
 ``slot_flip`` is the reverse-slot involution: ``c(slot_flip[s], c(s, x)) =
 x`` for all ``x``. Non-trivial pairs must be bit-0 adjacent (``2k <->
@@ -84,9 +86,9 @@ the block ancillas is not implementable on CUDA-Q today: qubits allocated
 inside a kernel are never deallocated mid-circuit, so per-step scratch
 allocation would grow the register with every walk step. Folding the
 scratch into the reflected ancilla register is *exactly* equivalent:
-scratch is deterministically |0> at every reflection point, and ``I - 2
-|0><0|_(block+scratch)`` restricted to the scratch-|0> subspace equals ``I
-- 2 |0><0|_block``. ``num_block_ancilla`` and ``num_scratch`` expose the
+scratch is deterministically ``|0>`` at every reflection point, and ``I - 2
+``|0>``<0|_(block+scratch)`` restricted to the scratch-``|0>`` subspace equals ``I
+- 2 ``|0>``<0|_block``. ``num_block_ancilla`` and ``num_scratch`` expose the
 split for hardware-cost accounting.
 """
 
@@ -150,7 +152,7 @@ class OracleKernels:
     value_bits
         Fixed-point bits of the angle register (>= 1).
     num_work
-        Work qubits the oracles need (returned to |0>).
+        Work qubits the oracles need (returned to ``|0>``).
     slot_flip
         Reverse-slot involution over the *padded* slot range, or ``None``
         if unavailable (then only ``from_general_oracles`` applies).
@@ -349,7 +351,7 @@ class SparseOracleEncoding:
             """S controlled by qubit 0 of ``control_and_ancilla``.
 
             The pattern match for the slot flip is computed into a (then
-            |0>) work qubit so every gate has an individual-qubit control
+            ``|0>``) work qubit so every gate has an individual-qubit control
             set (a CUDA-Q control set cannot mix a qview with a qubit).
             """
             for k in range(n_sys):
@@ -387,7 +389,7 @@ class SparseOracleEncoding:
                                system: cudaq.qview):
             """Controlled U_A = T-dagger (controlled-S) T.
 
-            The uncontrolled T pair cancels at control |0>, so only the S
+            The uncontrolled T pair cancels at control ``|0>``, so only the S
             factor carries the external control.
             """
             t_iso(control_and_ancilla.back(n_anc), system)
@@ -453,7 +455,7 @@ class SparseOracleEncoding:
 
     @property
     def num_scratch(self) -> int:
-        """Value/sign/upper/work qubits, deterministically |0> outside
+        """Value/sign/upper/work qubits, deterministically ``|0>`` outside
         the oracle-load window inside U_A."""
         return self._num_scratch
 
@@ -469,7 +471,7 @@ class SparseOracleEncoding:
 
     @property
     def h(self) -> float:
-        """Value normalization (h >= max |H_ij|)."""
+        """Value normalization (h >= max ``|H_ij|``)."""
         return self._h
 
     @property
@@ -503,9 +505,9 @@ class SparseOracleEncoding:
 
         Without ``state_prep``: a ``@cudaq.kernel(state)`` allocating the
         system register from ``state`` and the ancilla register (in
-        |0...0>) after it. With ``state_prep`` (a ``(qubits: qview)``
+        ``|0...0>``) after it. With ``state_prep`` (a ``(qubits: qview)``
         kernel): a zero-argument kernel that allocates the system register
-        in |0...0>, runs ``state_prep`` on it, then applies the encoding.
+        in ``|0...0>``, runs ``state_prep`` on it, then applies the encoding.
         """
         apply_u = self._apply
         n_anc = self.num_ancilla
