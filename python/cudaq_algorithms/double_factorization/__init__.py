@@ -8,15 +8,23 @@ linear algebra runs on the NVIDIA math libraries (cuSOLVER / cuBLAS via CuPy)
 when a GPU is available, with a NumPy/SciPy fallback selected automatically.
 """
 from ._backend import cupy_gpu_available, resolve_backend
-from ._factorization import (DoubleFactorization,
+from ._factorization import (CG_ITERATION_CAP_FACTOR, LSTSQ_FALLBACK_MAX_BYTES,
+                             LSTSQ_RESIDUAL_TOLERANCE, DoubleFactorization,
+                             InnerSolveDiagnostics, InnerSolveSummary,
                              compressed_double_factorization,
                              double_factorization_one_norm,
                              explicit_double_factorization,
-                             factorization_error, modified_one_body_integrals,
-                             reconstruct_eri)
+                             factorization_error, lstsq_design_bytes,
+                             modified_one_body_integrals, reconstruct_eri)
 
 __all__ = [
     "DoubleFactorization",
+    "InnerSolveDiagnostics",
+    "InnerSolveSummary",
+    "CG_ITERATION_CAP_FACTOR",
+    "LSTSQ_FALLBACK_MAX_BYTES",
+    "LSTSQ_RESIDUAL_TOLERANCE",
+    "lstsq_design_bytes",
     "explicit_double_factorization",
     "compressed_double_factorization",
     "reconstruct_eri",

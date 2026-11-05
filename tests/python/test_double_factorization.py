@@ -768,14 +768,16 @@ def test_cg_inner_cores_match_lstsq_below_cg_tolerance(backend):
     # The projected RHS is nonzero and smaller than cg_tolerance.
     assert 0.0 < rhs_norm < tolerance
 
-    cg = [
-        to_numpy(core) for core in F._solve_inner_cores_cg(
-            eri_dev, rotations, xp, tolerance=tolerance)
-    ]
-    lstsq = [
-        to_numpy(core)
-        for core in F._solve_inner_cores_lstsq(eri_dev, rotations, xp)
-    ]
+    cg_cores, cg_diag = F._solve_inner_cores_cg(eri_dev,
+                                                rotations,
+                                                xp,
+                                                tolerance=tolerance)
+    cg = [to_numpy(core) for core in cg_cores]
+    lstsq_cores, lstsq_diag = F._solve_inner_cores_lstsq(
+        eri_dev, rotations, xp)
+    lstsq = [to_numpy(core) for core in lstsq_cores]
+    assert cg_diag.converged and cg_diag.termination == "converged"
+    assert lstsq_diag.converged and lstsq_diag.termination == "direct"
 
     def reconstruct(cores):
         # (J, -J) is a null vector of the two-leaf design, so the core stacks
@@ -804,11 +806,303 @@ def test_cg_inner_cores_are_zero_for_a_zero_rhs(backend):
     eri_dev = to_device(np.zeros((n, n, n, n)), xp)
     rotations = [to_device(np.eye(n), xp) for _ in range(num_leaves)]
     guess = xp.ones((num_leaves, n, n))
-    cores = F._solve_inner_cores_cg(eri_dev,
-                                    rotations,
-                                    xp,
-                                    max_iterations=1,
-                                    initial_guess=guess)
+    cores, diag = F._solve_inner_cores_cg(eri_dev,
+                                          rotations,
+                                          xp,
+                                          max_iterations=1,
+                                          initial_guess=guess)
     # One iteration from this guess cannot reach 0, so an exact 0 is the early return.
     for core in cores:
         assert np.allclose(to_numpy(core), 0.0)
+    assert diag.converged and diag.termination == "zero_rhs"
+    assert diag.iterations == 0 and diag.residual_norm == 0.0
+    assert diag.threshold == 0.0 and diag.rhs_norm == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# Inner-solve diagnostics and verified stopping
+# --------------------------------------------------------------------------- #
+
+
+def _inner_setup(backend, eri, num_leaves, rho=0.0):
+    """Fixed X-DF rotations on ``backend``: ``(xp, eri_dev, rotations, op)``."""
+    import cudaq_algorithms.double_factorization._factorization as F
+    from cudaq_algorithms.double_factorization._backend import (
+        resolve_backend, to_device)
+    xdf = df.explicit_double_factorization(eri,
+                                           threshold=0.0,
+                                           max_num_leaves=num_leaves,
+                                           backend="numpy")
+    rotations = [np.asarray(u, dtype=float) for u in xdf.leaf_rotations]
+    while len(rotations) < num_leaves:
+        rotations.append(np.eye(eri.shape[0]))
+    xp, _ = resolve_backend(backend)
+    eri_dev = to_device(eri, xp)
+    rotations_dev = [to_device(u, xp) for u in rotations]
+    return xp, eri_dev, rotations_dev, F._InnerOperator(
+        eri_dev, rotations_dev, xp, rho)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_cg_reports_an_exhausted_iteration_cap(backend):
+    import cudaq_algorithms.double_factorization._factorization as F
+    eri = _synthetic_eri(n=4, num_vectors=5, seed=9)
+    xp, eri_dev, rotations, op = _inner_setup(backend, eri, 3)
+    cores, diag = F._solve_inner_cores_cg(eri_dev,
+                                          rotations,
+                                          xp,
+                                          max_iterations=1,
+                                          operator=op)
+    assert diag.converged is False
+    assert diag.termination == "max_iterations"
+    assert diag.iterations == 1
+    assert diag.residual_norm > diag.threshold > 0.0
+    assert diag.fallback is None
+    # The approximate cores are still returned and symmetric.
+    assert len(cores) == 3
+    for core in cores:
+        core = np.asarray(core if xp is np else xp.asnumpy(core))
+        assert np.allclose(core, core.T)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_cg_verifies_the_true_residual_before_accepting(backend):
+    # Feed the recurrence a slightly wrong matvec while verification uses
+    # the exact one. The recursive residual then reaches the threshold on
+    # schedule, but the solver must not report convergence unless the
+    # verified residual agrees. Accepting the recursive residual alone was
+    # the product bug.
+    import cudaq_algorithms.double_factorization._factorization as F
+    eri = _synthetic_eri(n=4, num_vectors=5, seed=9)
+    xp, eri_dev, rotations, exact = _inner_setup(backend, eri, 3)
+    bias = 1.0e-3 * exact.rhs
+
+    class _LyingOperator(F._InnerOperator):
+
+        def apply(self, z):
+            return super().apply(z) + bias
+
+        def residual(self, z):
+            return self.rhs - super().apply(z)
+
+    lying = _LyingOperator(eri_dev, rotations, xp, 0.0)
+    cores, diag = F._solve_inner_cores_cg(eri_dev,
+                                          rotations,
+                                          xp,
+                                          tolerance=1.0e-10,
+                                          operator=lying)
+    verified = exact.residual_norm(xp.stack(cores))
+    assert np.isclose(diag.residual_norm, verified, rtol=1.0e-6)
+    assert diag.converged == (verified <= diag.threshold)
+    # With this bias the lied-to recurrence cannot actually converge.
+    assert diag.converged is False
+    assert diag.termination in ("numerical_failure", "max_iterations")
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_cg_reports_curvature_breakdown_and_numerical_failure(backend):
+    import cudaq_algorithms.double_factorization._factorization as F
+    eri = _synthetic_eri(n=4, num_vectors=5, seed=9)
+    xp, eri_dev, rotations, op = _inner_setup(backend, eri, 3)
+
+    class _Indefinite(F._InnerOperator):
+
+        def apply(self, z):
+            return -super().apply(z)
+
+    cores, diag = F._solve_inner_cores_cg(eri_dev,
+                                          rotations,
+                                          xp,
+                                          operator=_Indefinite(
+                                              eri_dev, rotations, xp, 0.0))
+    assert diag.termination == "curvature_breakdown"
+    assert diag.converged is False and diag.iterations == 0
+    assert "p^T" in diag.message
+
+    guess = xp.full((3, 4, 4), float("nan"))
+    cores, diag = F._solve_inner_cores_cg(eri_dev,
+                                          rotations,
+                                          xp,
+                                          initial_guess=guess,
+                                          operator=op)
+    assert diag.termination == "numerical_failure"
+    assert diag.converged is False
+    assert not np.isfinite(diag.residual_norm)
+
+
+def test_invalid_inner_options_raise():
+    import cudaq_algorithms.double_factorization._factorization as F
+    eri = _synthetic_eri(n=3, num_vectors=2, seed=1)
+    with pytest.raises(ValueError, match="inner_fallback"):
+        df.compressed_double_factorization(eri,
+                                           num_leaves=2,
+                                           inner_solver="cg",
+                                           inner_fallback="svd")
+    xp, eri_dev, rotations, _ = _inner_setup("numpy", eri, 2)
+    with pytest.raises(ValueError, match="inner_fallback"):
+        F._solve_inner_cores(eri_dev, rotations, xp, solver="cg", fallback="x")
+
+
+def test_lstsq_design_bytes():
+    # n^4 rows x T n(n+1)/2 columns, float64.
+    assert df.lstsq_design_bytes(4, 2) == 8 * 256 * 20
+    assert df.LSTSQ_FALLBACK_MAX_BYTES == 1 << 30
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_cdf_reports_and_warns_on_an_unconverged_final_inner_solve(backend):
+    # A one-iteration inner cap cannot solve the cores. The fit must come
+    # back marked unconverged with the final-solve diagnostics, warn once
+    # about the final solve and once about the in-loop misses, and never
+    # warn per in-loop solve.
+    eri = _synthetic_eri(n=4, num_vectors=5, seed=9)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fit = df.compressed_double_factorization(eri,
+                                                 num_leaves=3,
+                                                 max_iterations=20,
+                                                 inner_solver="cg",
+                                                 cg_max_iterations=1,
+                                                 backend=backend)
+    messages = [
+        str(w.message) for w in caught
+        if issubclass(w.category, RuntimeWarning)
+    ]
+    final = [m for m in messages if "final inner core solve" in m]
+    loop = [m for m in messages if "during the optimization" in m]
+    assert len(final) == 1 and len(loop) == 1
+    assert fit.converged is False
+    assert fit.inner_solve.converged is False
+    assert fit.inner_solve.termination == "max_iterations"
+    assert fit.inner_solve.iterations == 1
+    assert fit.inner_solve.residual_norm > fit.inner_solve.threshold
+    summary = fit.inner_solve_summary
+    assert summary.num_solves >= 1
+    assert summary.num_unconverged == summary.num_solves
+    assert summary.worst_residual_to_threshold > 1.0
+    assert summary.terminations == {"max_iterations": summary.num_solves}
+    assert summary.max_iterations == 1
+    assert summary.total_iterations == summary.num_solves
+    # Objective is recomputed with the returned (approximate) cores.
+    expected = 0.5 * df.factorization_error(eri, fit)**2
+    assert np.isclose(fit.objective, expected, rtol=1.0e-8)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_lstsq_fallback_rescues_a_capped_cg_solve(backend):
+    import cudaq_algorithms.double_factorization._factorization as F
+    eri = _synthetic_eri(n=4, num_vectors=5, seed=9)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        fit = df.compressed_double_factorization(eri,
+                                                 num_leaves=3,
+                                                 max_iterations=400,
+                                                 regularization=1.0e-3,
+                                                 inner_solver="cg",
+                                                 cg_max_iterations=1,
+                                                 inner_fallback="lstsq",
+                                                 backend=backend)
+    assert fit.converged
+    assert fit.inner_solve.solver == "lstsq"
+    assert fit.inner_solve.fallback == "lstsq"
+    assert fit.inner_solve.iterations == 1  # the CG attempt
+    assert "cg terminated with max_iterations" in fit.inner_solve.message
+    assert fit.inner_solve_summary.num_unconverged == 0
+    # Same answer as the direct solver throughout.
+    direct = df.compressed_double_factorization(eri,
+                                                num_leaves=3,
+                                                max_iterations=400,
+                                                regularization=1.0e-3,
+                                                inner_solver="lstsq",
+                                                backend=backend)
+    assert np.isclose(fit.objective, direct.objective, rtol=1.0e-6)
+
+    # Over the memory bound the fallback is skipped and says so.
+    xp, eri_dev, rotations, _ = _inner_setup(backend, eri, 3)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(F, "LSTSQ_FALLBACK_MAX_BYTES", 0)
+        cores, diag = F._solve_inner_cores(eri_dev,
+                                           rotations,
+                                           xp,
+                                           solver="cg",
+                                           cg_max_iterations=1,
+                                           fallback="lstsq")
+    assert diag.converged is False and diag.fallback is None
+    assert "lstsq fallback skipped" in diag.message
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+@pytest.mark.parametrize("inner_solver", ["lstsq", "cg"])
+def test_cdf_diagnostics_on_a_converged_fit(backend, inner_solver):
+    eri = _synthetic_eri(n=4, num_vectors=3, seed=11)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        fit = df.compressed_double_factorization(eri,
+                                                 num_leaves=3,
+                                                 max_iterations=1500,
+                                                 inner_solver=inner_solver,
+                                                 inner_solve_history=True,
+                                                 backend=backend)
+    assert fit.converged and fit.optimizer_success
+    assert isinstance(fit.optimizer_status, int)
+    assert isinstance(fit.optimizer_message, str) and fit.optimizer_message
+    inner = fit.inner_solve
+    assert inner.solver == inner_solver
+    assert inner.converged and inner.residual_norm <= inner.threshold
+    # The direct solver is held to the looser LSTSQ_RESIDUAL_TOLERANCE.
+    expected_tolerance = (1.0e-10 if inner_solver == "cg" else
+                          df.LSTSQ_RESIDUAL_TOLERANCE)
+    assert inner.tolerance == expected_tolerance
+    assert np.isclose(inner.threshold, expected_tolerance * inner.rhs_norm)
+    assert inner.residual_ratio <= expected_tolerance
+    assert inner.termination == ("direct"
+                                 if inner_solver == "lstsq" else "converged")
+    summary = fit.inner_solve_summary
+    assert summary.num_unconverged == 0
+    assert summary.num_solves >= 1
+    # History: every in-loop solve, then the final one.
+    assert len(fit.inner_solve_history) == summary.num_solves + 1
+    assert fit.inner_solve_history[-1] is inner
+    assert np.isclose(fit.objective,
+                      0.5 * df.factorization_error(eri, fit)**2,
+                      rtol=1.0e-6,
+                      atol=1.0e-20)
+    assert fit.objective < 1.0e-8
+
+
+def test_xdf_diagnostics_are_unset_and_converged():
+    eri = _synthetic_eri(4, 2, seed=3)
+    fit = df.explicit_double_factorization(eri, threshold=0.0)
+    assert fit.converged is True
+    for name in ("optimizer_status", "optimizer_message", "objective",
+                 "inner_solve", "inner_solve_summary", "inner_solve_history"):
+        assert getattr(fit, name) is None
+
+
+def test_inner_solve_summary_record():
+    diag = df.InnerSolveDiagnostics(solver="cg",
+                                    preconditioner="none",
+                                    converged=False,
+                                    termination="max_iterations",
+                                    iterations=7,
+                                    residual_norm=3.0,
+                                    threshold=1.0,
+                                    rhs_norm=10.0,
+                                    tolerance=0.1)
+    assert diag.residual_ratio == 0.3
+    summary = df.InnerSolveSummary()
+    summary.record(diag)
+    summary.record(
+        df.InnerSolveDiagnostics(solver="cg",
+                                 preconditioner="none",
+                                 converged=True,
+                                 termination="converged",
+                                 iterations=2,
+                                 residual_norm=0.5,
+                                 threshold=1.0,
+                                 rhs_norm=10.0,
+                                 tolerance=0.1))
+    assert summary.num_solves == 2 and summary.num_unconverged == 1
+    assert summary.total_iterations == 9 and summary.max_iterations == 7
+    assert summary.worst_residual_to_threshold == 3.0
+    assert summary.terminations == {"max_iterations": 1, "converged": 1}

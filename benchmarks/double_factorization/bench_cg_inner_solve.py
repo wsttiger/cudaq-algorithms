@@ -89,7 +89,7 @@ def cg_iterations(eri_dev, rotations_dev, xp, regularization, tolerance):
     rs = ip(residual, residual)
     threshold = (tolerance**2) * max(float(to_numpy(rs)), 1.0)
     iterations = 0
-    for _ in range(max(50, num_leaves * n * n)):
+    for _ in range(F._default_cg_iteration_cap(num_leaves, n)):
         if float(to_numpy(rs)) <= threshold:
             break
         iterations += 1
@@ -185,11 +185,12 @@ def run_default(eri, num_leaves, rho, tol, repeats, ab):
               f"tol={tol:g} ===")
 
         iters = cg_iterations(eri_dev, rotations, xp, rho, tol)
-        new_time, new_cores = time_call(
+        new_time, (new_cores, new_diag) = time_call(
             lambda: F._solve_inner_cores_cg(eri_dev, rotations, xp, rho, tol,
                                             None), repeats, xp)
         print(
-            f"  CG (batched)       : {new_time*1e3:9.2f} ms   ({iters} iters)")
+            f"  CG (batched)       : {new_time*1e3:9.2f} ms   ({iters} iters,"
+            f" {new_diag.termination})")
 
         if ab:
             old_time, old_cores = time_call(
@@ -203,7 +204,7 @@ def run_default(eri, num_leaves, rho, tol, repeats, ab):
 
         gb = lstsq_design_gb(n, num_leaves)
         if gb <= 8.0:
-            ls_time, ls_cores = time_call(
+            ls_time, (ls_cores, _) = time_call(
                 lambda: F._solve_inner_cores_lstsq(eri_dev, rotations, xp, rho
                                                    ), repeats, xp)
             rn = to_numpy(F._reconstruct_dev(rotations, new_cores, xp))

@@ -21,8 +21,9 @@ fewer leaves at equal accuracy.
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass
-from typing import List, Optional
+import math
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 
 import numpy as np
 import scipy.linalg
@@ -37,6 +38,83 @@ from ._backend import (AUTO_GPU_MIN_ORBITALS_COMPRESSED,
 
 
 @dataclass
+class InnerSolveDiagnostics:
+    """Outcome of one inner core solve ``(A + 2 rho I) Z = R`` at fixed leaf
+    rotations.
+
+    ``residual_norm`` is the *verified* residual ``||R - (A + 2 rho I) Z||_F``
+    of the returned (symmetrized) cores, recomputed from the operator rather
+    than read off the conjugate-gradient recurrence; ``threshold`` is
+    ``tolerance * ||R||_F``, and ``converged`` is exactly
+    ``residual_norm <= threshold``. ``termination`` is one of
+
+    - ``"converged"`` -- the verified residual met the threshold;
+    - ``"zero_rhs"`` -- ``R == 0``, so ``Z = 0`` is returned;
+    - ``"max_iterations"`` -- the iteration cap was exhausted first;
+    - ``"curvature_breakdown"`` -- a CG search direction had non-positive
+      curvature ``p^T (A + 2 rho I) p``;
+    - ``"numerical_failure"`` -- a non-finite quantity, or the recursive
+      residual passed the threshold while the verified residual stopped
+      improving (stagnation).
+
+    ``solver`` is ``"cg"`` or ``"lstsq"``; ``preconditioner`` is ``"none"``; ``fallback`` names the direct solver that produced
+    the cores when the iterative solve did not converge (``None``
+    otherwise), and ``message`` carries free-form detail.
+    """
+
+    solver: str
+    preconditioner: str
+    converged: bool
+    termination: str
+    iterations: int
+    residual_norm: float
+    threshold: float
+    rhs_norm: float
+    tolerance: float
+    fallback: Optional[str] = None
+    message: str = ""
+
+    @property
+    def residual_ratio(self) -> float:
+        """``residual_norm / ||R||_F`` (``0.0`` for a zero right-hand side);
+        compare against ``tolerance``."""
+        return self.residual_norm / self.rhs_norm if self.rhs_norm > 0 else 0.0
+
+
+@dataclass
+class InnerSolveSummary:
+    """Bounded summary of the inner solves performed *during* the C-DF
+    optimization (the final tightened solve is reported separately as
+    ``DoubleFactorization.inner_solve``).
+
+    ``num_unconverged`` counts solves whose verified residual missed the
+    in-loop threshold; ``worst_residual_to_threshold`` is the largest
+    ``residual_norm / threshold`` seen (``> 1`` means a miss);
+    ``terminations`` counts termination reasons.
+    """
+
+    num_solves: int = 0
+    num_unconverged: int = 0
+    total_iterations: int = 0
+    max_iterations: int = 0
+    worst_residual_to_threshold: float = 0.0
+    terminations: Dict[str, int] = field(default_factory=dict)
+
+    def record(self, diagnostics: "InnerSolveDiagnostics") -> None:
+        self.num_solves += 1
+        self.total_iterations += diagnostics.iterations
+        self.max_iterations = max(self.max_iterations, diagnostics.iterations)
+        if not diagnostics.converged:
+            self.num_unconverged += 1
+        if diagnostics.threshold > 0.0:
+            self.worst_residual_to_threshold = max(
+                self.worst_residual_to_threshold,
+                diagnostics.residual_norm / diagnostics.threshold)
+        self.terminations[diagnostics.termination] = self.terminations.get(
+            diagnostics.termination, 0) + 1
+
+
+@dataclass
 class DoubleFactorization:
     """Result of a double factorization of the two-electron integrals.
 
@@ -44,10 +122,25 @@ class DoubleFactorization:
     ``(num_orbitals, num_orbitals)``) and ``leaf_cores[t]`` is the symmetric
     core ``Z^t`` for leaf ``t``. ``method`` is ``"X-DF"`` or ``"C-DF"``.
 
-    C-DF fills ``optimizer_success``, ``optimizer_nit``, and
-    ``optimizer_grad_norm`` from the L-BFGS-B result (``None`` on X-DF).
-    When ``n == 1``, no optimization runs, so those fields are ``True``,
-    ``0``, and ``0.0``.
+    C-DF fills the optimizer and inner-solve diagnostics (all ``None`` on
+    X-DF):
+
+    - ``optimizer_success``, ``optimizer_nit``, ``optimizer_status``,
+      ``optimizer_message`` come from the L-BFGS-B result;
+      ``optimizer_grad_norm`` is the gradient norm at the last optimizer
+      evaluation, i.e. measured with the *in-loop* (loose) inner solve.
+    - ``objective`` is the fitting objective ``1/2 ||eri - recon||_F^2 +
+      rho ||Z||_F^2`` recomputed with the returned cores (the final, tight
+      inner solve).
+    - ``inner_solve`` is the :class:`InnerSolveDiagnostics` of that final
+      solve; ``inner_solve_summary`` is the bounded
+      :class:`InnerSolveSummary` over the in-loop solves, and
+      ``inner_solve_history`` lists every solve (in-loop then final) when
+      requested.
+
+    When ``n == 1``, no optimization runs, so ``optimizer_success`` is
+    ``True``, ``optimizer_nit`` is ``0``, and ``optimizer_grad_norm`` is
+    ``0.0``.
     """
 
     num_orbitals: int
@@ -61,10 +154,28 @@ class DoubleFactorization:
     optimizer_success: Optional[bool] = None
     optimizer_nit: Optional[int] = None
     optimizer_grad_norm: Optional[float] = None
+    optimizer_status: Optional[int] = None
+    optimizer_message: Optional[str] = None
+    objective: Optional[float] = None
+    inner_solve: Optional[InnerSolveDiagnostics] = None
+    inner_solve_summary: Optional[InnerSolveSummary] = None
+    inner_solve_history: Optional[List[InnerSolveDiagnostics]] = None
 
     @property
     def num_leaves(self) -> int:
         return len(self.leaf_rotations)
+
+    @property
+    def converged(self) -> bool:
+        """``True`` when every iterative stage met its criterion: the outer
+        optimizer reported success and the final inner solve's verified
+        residual is within its threshold. X-DF has no iterative stage and
+        is always ``True``."""
+        if self.optimizer_success is False:
+            return False
+        if self.inner_solve is not None and not self.inner_solve.converged:
+            return False
+        return True
 
     def reconstruct_eri(self) -> np.ndarray:
         """Reconstruct the ``(n, n, n, n)`` chemist-notation ERI tensor."""
@@ -279,100 +390,231 @@ def _project_eri_into_leaf(eri_dev: DeviceArray, rotation: DeviceArray,
     return xp.einsum("pqk,pqrs,rsl->kl", a, eri_dev, a, optimize=True)
 
 
-def _solve_inner_cores_cg(
-        eri_dev: DeviceArray,
-        rotations_dev: DeviceArray,
-        xp: ArrayModule,
-        regularization: float = 0.0,
-        tolerance: float = 1.0e-10,
-        max_iterations: Optional[int] = None,
-        initial_guess: Optional[DeviceArray] = None) -> List[DeviceArray]:
-    """Matrix-free conjugate-gradient solve for the symmetric cores ``{Z^t}``.
+class _InnerOperator:
+    """The inner normal-equation operator ``(A + 2 rho I)`` at fixed leaf
+    rotations, batched over leaves, plus its right-hand side ``R``.
 
-    Solves the same normal equations as the least-squares solver,
-    ``(A + 2 rho I) Z = R``, but never forms the ``n^4 x num_params`` design
-    matrix (RC-DF Eqs. 25-30). The operator factorizes as
+    Solving ``(A + 2 rho I) Z = R`` gives the (ridge-regularized) least-squares
+    optimal symmetric cores (RC-DF Eqs. 25-30). The operator factorizes as
 
         A(Z)^t = sum_{t'} M_{tt'} Z^{t'} M_{tt'}^T ,
         M_{tt'} = (U^t^T U^{t'}) elementwise-squared      (Eq. 27)
 
-    so each matvec is just ``n x n`` matrix products; the ERIs are contracted
-    only once to build the RHS ``R^t``. The cores are stacked into a single
-    ``(num_leaves, n, n)`` array so the whole operator is one batched ``einsum``
-    (a strided-batched GEMM under cuBLAS) rather than ``num_leaves^2`` Python-
-    driven launches, and the CG scalars stay on device -- only the convergence and
-    curvature guards sync to host. This scales to large orbital counts where the
-    explicit design matrix is infeasible.
-
-    ``tolerance`` is relative to the right-hand side: iteration stops when
-    ``||r||_F <= tolerance * ||R||_F`` (and immediately when ``R`` is zero).
-    ``initial_guess`` (a stacked ``(num_leaves, n, n)`` array) warm-starts CG. In
-    the C-DF optimizer the rotations -- and hence the cores -- change slowly
-    between L-BFGS steps, so seeding from the previous step's solution collapses
-    the iteration count.
+    so each application is a batched ``n x n`` matrix product (a strided
+    GEMM under cuBLAS) and the ERIs are contracted only once, for ``R``.
+    ``M_tt = I``, so each diagonal block of ``A + 2 rho I`` is ``alpha I``
+    with ``alpha = 1 + 2 rho``.
     """
-    n = eri_dev.shape[0]
-    num_leaves = len(rotations_dev)
 
-    # M_{tt'} = (U^t^T U^{t'}) elementwise-squared, stacked as (t, t', k, l).
-    rotations = xp.stack(rotations_dev)
-    metric = xp.einsum("tpk,upl->tukl", rotations, rotations)
-    metric = metric * metric
-    rhs = xp.stack(
-        [_project_eri_into_leaf(eri_dev, u, xp) for u in rotations_dev])
+    def __init__(self, eri_dev: DeviceArray, rotations_dev: DeviceArray,
+                 xp: ArrayModule, regularization: float):
+        self.xp = xp
+        self.regularization = float(regularization)
+        self.alpha = 1.0 + 2.0 * self.regularization
+        rotations = rotations_dev if _is_stacked(rotations_dev) else xp.stack(
+            list(rotations_dev))
+        self.num_leaves, self.n = rotations.shape[0], rotations.shape[1]
+        metric = xp.einsum("tpk,upl->tukl", rotations, rotations)
+        self.metric = metric * metric  # (t, t', k, l)
+        self.rhs = xp.stack([
+            _project_eri_into_leaf(eri_dev, rotations[t], xp)
+            for t in range(self.num_leaves)
+        ])
+        self.rhs_norm = math.sqrt(float(to_numpy(xp.sum(self.rhs * self.rhs))))
 
-    def apply_operator(z):
-        # A(Z)^t = sum_{t'} M_{tt'} Z^{t'} M_{tt'}^T, all leaves at once.
-        out = xp.einsum("tukl,ulm,tunm->tkn", metric, z, metric, optimize=True)
-        if regularization > 0.0:
-            out = out + (2.0 * regularization) * z
+    def apply(self, z: DeviceArray) -> DeviceArray:
+        out = self.xp.einsum("tukl,ulm,tunm->tkn",
+                             self.metric,
+                             z,
+                             self.metric,
+                             optimize=True)
+        if self.regularization > 0.0:
+            out = out + (2.0 * self.regularization) * z
         return out
 
+    def residual(self, z: DeviceArray) -> DeviceArray:
+        """``R - (A + 2 rho I) Z``."""
+        return self.rhs - self.apply(z)
+
+    def residual_norm(self, z: DeviceArray) -> float:
+        residual = self.residual(z)
+        return math.sqrt(float(to_numpy(self.xp.sum(residual * residual))))
+
+
+# Default CG iteration cap as a multiple of the system dimension
+# ``num_leaves * n^2`` (the count exact arithmetic needs at most).
+CG_ITERATION_CAP_FACTOR = 1
+
+
+def _default_cg_iteration_cap(num_leaves: int, n: int) -> int:
+    return max(50, CG_ITERATION_CAP_FACTOR * num_leaves * n * n)
+
+
+def _solve_inner_cores_cg(
+    eri_dev: DeviceArray,
+    rotations_dev: DeviceArray,
+    xp: ArrayModule,
+    regularization: float = 0.0,
+    tolerance: float = 1.0e-10,
+    max_iterations: Optional[int] = None,
+    initial_guess: Optional[DeviceArray] = None,
+    residual_replacement_interval: Optional[int] = None,
+    operator: Optional[_InnerOperator] = None,
+) -> tuple[List[DeviceArray], InnerSolveDiagnostics]:
+    """Matrix-free conjugate-gradient solve for the
+    symmetric cores ``{Z^t}``: ``(A + 2 rho I) Z = R`` with the operator of
+    :class:`_InnerOperator`, never forming the ``n^4 x num_params`` design
+    matrix. The cores are stacked into one ``(num_leaves, n, n)`` array so a
+    matvec is a single batched contraction, and the CG scalars stay on the
+    device; only the convergence and curvature guards sync to the host.
+
+    ``tolerance`` is relative to the right-hand side: the solve is accepted
+    when the *verified* residual ``||R - (A + 2 rho I) Z||_F`` of the
+    symmetrized cores is at most ``tolerance * ||R||_F`` (immediately when
+    ``R`` is zero). The recursively updated CG residual only triggers that
+    check; if it has drifted from the true residual, the true residual is
+    substituted, the recurrence restarted, and iteration continues. With
+    ``residual_replacement_interval = k`` the recursive residual is also
+    replaced by the true residual every ``k`` iterations (the direction
+    recurrence continues; one extra matvec per replacement).
+
+    ``max_iterations`` defaults to ``CG_ITERATION_CAP_FACTOR`` times the
+    system dimension ``num_leaves * n^2``; an explicit value is used as given.
+    ``initial_guess`` (a stacked ``(num_leaves, n, n)`` array) warm-starts CG.
+    ``operator`` reuses an already-built :class:`_InnerOperator`.
+
+    Returns ``(cores, diagnostics)``. The cores are returned with their
+    diagnostics whatever the termination reason: an exhausted iteration cap,
+    curvature breakdown, or stagnation is reported, not raised, and
+    ``diagnostics.converged`` says whether the criterion was met.
+    """
+    op = operator if operator is not None else _InnerOperator(
+        eri_dev, rotations_dev, xp, regularization)
+    n, num_leaves = op.n, op.num_leaves
+    rhs_norm = op.rhs_norm
+    threshold = float(tolerance) * rhs_norm
+
+    def diagnostics(z, iterations, termination, message=""):
+        residual_norm = op.residual_norm(z)
+        converged = residual_norm <= threshold
+        return InnerSolveDiagnostics(
+            solver="cg",
+            preconditioner="none",
+            converged=converged,
+            termination="converged" if converged else termination,
+            iterations=iterations,
+            residual_norm=residual_norm,
+            threshold=threshold,
+            rhs_norm=rhs_norm,
+            tolerance=float(tolerance),
+            message=message)
+
     def inner_product(x, y):
-        # A device scalar (0-d array); converted to host only where needed.
-        return xp.sum(x * y)
+        return xp.sum(x * y)  # device scalar
+
+    def symmetrize(z):
+        return 0.5 * (z + z.transpose(0, 2, 1))
 
     # R = 0: the (ridge or minimum-norm) solution is Z = 0 whatever the guess.
-    rhs_norm_sq = float(to_numpy(inner_product(rhs, rhs)))
-    if rhs_norm_sq == 0.0:
-        return [xp.zeros((n, n)) for _ in range(num_leaves)]
+    if rhs_norm == 0.0:
+        z = xp.zeros((num_leaves, n, n))
+        return [z[t] for t in range(num_leaves)
+                ], InnerSolveDiagnostics(solver="cg",
+                                         preconditioner="none",
+                                         converged=True,
+                                         termination="zero_rhs",
+                                         iterations=0,
+                                         residual_norm=0.0,
+                                         threshold=0.0,
+                                         rhs_norm=0.0,
+                                         tolerance=float(tolerance))
 
     if initial_guess is None:
         z = xp.zeros((num_leaves, n, n))
-        residual = rhs.copy()  # r = rhs - A(0) = rhs since z = 0
+        residual = op.rhs.copy()  # r = R - A(0)
     else:
-        z = xp.asarray(initial_guess).copy()
-        residual = rhs - apply_operator(z)
-    direction = residual.copy()
-    residual_norm_sq = inner_product(residual, residual)
-    # Stop when ||r||_F <= tolerance * ||R||_F.
-    threshold = (tolerance**2) * rhs_norm_sq
-    limit = max_iterations if max_iterations is not None else max(
-        50, num_leaves * n * n)
+        z = symmetrize(xp.asarray(initial_guess))
+        residual = op.residual(z)
 
-    for _ in range(limit):
-        if float(to_numpy(residual_norm_sq)) <= threshold:
+    def restart(residual):
+        norm_sq = inner_product(residual, residual)
+        return residual.copy(), norm_sq, norm_sq
+
+    direction, residual_dot, residual_norm_sq = restart(residual)
+    threshold_sq = threshold * threshold
+    limit = (max_iterations if max_iterations is not None else
+             _default_cg_iteration_cap(num_leaves, n))
+    iterations = 0
+    last_verified_sq = math.inf
+    termination = None
+    message = ""
+
+    while True:
+        residual_norm_sq_host = float(to_numpy(residual_norm_sq))
+        if not math.isfinite(residual_norm_sq_host):
+            termination, message = "numerical_failure", "non-finite residual"
             break
-        operator_direction = apply_operator(direction)
+        if residual_norm_sq_host <= threshold_sq:
+            # The recursive residual passed: verify against the operator.
+            z = symmetrize(z)
+            residual = op.residual(z)
+            verified_sq = float(to_numpy(inner_product(residual, residual)))
+            if verified_sq <= threshold_sq:
+                termination = "converged"
+                break
+            if verified_sq >= last_verified_sq:
+                termination = "numerical_failure"
+                message = ("stagnation: the recursive residual met the "
+                           "threshold but the verified residual did not "
+                           "improve between restarts")
+                break
+            # Drift: continue from the true residual with a fresh recurrence.
+            last_verified_sq = verified_sq
+            direction, residual_dot, residual_norm_sq = restart(residual)
+            continue
+        if iterations >= limit:
+            termination = "max_iterations"
+            break
+        operator_direction = op.apply(direction)
         curvature = inner_product(direction, operator_direction)
-        if float(to_numpy(curvature)) <= 0.0:
+        curvature_host = float(to_numpy(curvature))
+        if not math.isfinite(curvature_host):
+            termination, message = "numerical_failure", "non-finite curvature"
             break
-        step = residual_norm_sq / curvature  # device scalar
+        if curvature_host <= 0.0:
+            termination = "curvature_breakdown"
+            message = f"p^T (A + 2 rho I) p = {curvature_host:.3e}"
+            break
+        step = residual_dot / curvature  # device scalar
         z = z + step * direction
-        residual = residual - step * operator_direction
-        new_norm_sq = inner_product(residual, residual)
-        beta = new_norm_sq / residual_norm_sq  # device scalar
+        iterations += 1
+        if (residual_replacement_interval
+                and iterations % residual_replacement_interval == 0):
+            # Periodic replacement: the true residual takes the place of the
+            # recursive one; the search direction recurrence continues.
+            residual = op.residual(z)
+        else:
+            residual = residual - step * operator_direction
+        new_dot = inner_product(residual, residual)
+        beta = new_dot / residual_dot  # device scalar
         direction = residual + beta * direction
-        residual_norm_sq = new_norm_sq
+        residual_dot = new_dot
+        residual_norm_sq = new_dot
 
-    z = 0.5 * (z + z.transpose(0, 2, 1))
-    return [z[t] for t in range(num_leaves)]
+    z = symmetrize(z)
+    return [z[t]
+            for t in range(num_leaves)], diagnostics(z, iterations,
+                                                     termination, message)
 
 
-def _solve_inner_cores_lstsq(eri_dev: DeviceArray,
-                             rotations_dev: DeviceArray,
-                             xp: ArrayModule,
-                             regularization: float = 0.0) -> List[DeviceArray]:
+def _solve_inner_cores_lstsq(
+    eri_dev: DeviceArray,
+    rotations_dev: DeviceArray,
+    xp: ArrayModule,
+    regularization: float = 0.0,
+    tolerance: float = 1.0e-10,
+    operator: Optional[_InnerOperator] = None,
+) -> tuple[List[DeviceArray], InnerSolveDiagnostics]:
     """Least-squares optimal symmetric cores ``{Z^t}`` for fixed rotations.
 
     Solves, for fixed ``U^t``,
@@ -385,6 +627,10 @@ def _solve_inner_cores_lstsq(eri_dev: DeviceArray,
     (arXiv:2212.07957, Eq. 17); it shrinks the cores and conditions the otherwise
     rank-deficient inner system. See ``_solve_inner_cores_cg`` for the matrix-free
     alternative that scales to large orbital counts.
+
+    Returns ``(cores, diagnostics)``; the diagnostics carry the verified
+    normal-equation residual of the solution against ``max(tolerance,
+    LSTSQ_RESIDUAL_TOLERANCE) * ||R||_F`` (``termination="direct"``).
     """
     n = eri_dev.shape[0]
     target = eri_dev.reshape(-1)
@@ -421,29 +667,104 @@ def _solve_inner_cores_lstsq(eri_dev: DeviceArray,
         value = solution[index]
         cores[leaf_index][k, l] = value
         cores[leaf_index][l, k] = value
-    return cores
+
+    op = operator if operator is not None else _InnerOperator(
+        eri_dev, rotations_dev, xp, regularization)
+    tolerance = max(float(tolerance), LSTSQ_RESIDUAL_TOLERANCE)
+    threshold = tolerance * op.rhs_norm
+    residual_norm = op.residual_norm(xp.stack(cores))
+    converged = op.rhs_norm == 0.0 or residual_norm <= threshold
+    return cores, InnerSolveDiagnostics(solver="lstsq",
+                                        preconditioner="none",
+                                        converged=converged,
+                                        termination="direct",
+                                        iterations=0,
+                                        residual_norm=residual_norm,
+                                        threshold=threshold,
+                                        rhs_norm=op.rhs_norm,
+                                        tolerance=tolerance)
+
+
+# The direct solver is held to the looser of the requested tolerance and
+# this relative normal-equation residual: ``lstsq`` minimizes ``||J z -
+# eri||`` with a truncated SVD of the design ``J``, and on the singular
+# ``rho = 0`` molecular systems its normal-equation residual
+# ``||R - A z||_F / ||R||_F`` lands around 1e-9 (measured on H6/H2O in
+# STO-3G) even though the least-squares fit itself is exact to round-off.
+LSTSQ_RESIDUAL_TOLERANCE = 1.0e-8
+
+
+def lstsq_design_bytes(num_orbitals: int, num_leaves: int) -> int:
+    """Size in bytes of the explicit float64 design matrix the ``"lstsq"``
+    inner solver assembles: ``n^4`` rows by ``num_leaves * n (n + 1) / 2``
+    symmetric-core parameters."""
+    n = int(num_orbitals)
+    return 8 * (n**4) * (int(num_leaves) * n * (n + 1) // 2)
+
+
+# Upper bound on the explicit design matrix the ``"lstsq"`` fallback may
+# assemble when a CG solve does not converge (``inner_fallback="lstsq"``).
+LSTSQ_FALLBACK_MAX_BYTES = 1 << 30
+
+_INNER_SOLVERS = ("lstsq", "cg")
+_INNER_FALLBACKS = ("none", "lstsq")
 
 
 def _solve_inner_cores(
-        eri_dev: DeviceArray,
-        rotations_dev: DeviceArray,
-        xp: ArrayModule,
-        regularization: float = 0.0,
-        solver: str = "lstsq",
-        cg_tolerance: float = 1.0e-10,
-        cg_max_iterations: Optional[int] = None,
-        initial_guess: Optional[DeviceArray] = None) -> List[DeviceArray]:
+    eri_dev: DeviceArray,
+    rotations_dev: DeviceArray,
+    xp: ArrayModule,
+    regularization: float = 0.0,
+    solver: str = "lstsq",
+    cg_tolerance: float = 1.0e-10,
+    cg_max_iterations: Optional[int] = None,
+    initial_guess: Optional[DeviceArray] = None,
+    fallback: str = "none",
+) -> tuple[List[DeviceArray], InnerSolveDiagnostics]:
     """Dispatch the inner core solve to the explicit ``"lstsq"`` solver or the
     matrix-free ``"cg"`` solver. ``initial_guess`` warm-starts CG and is ignored
-    by the direct lstsq solver."""
+    by the direct lstsq solver. With ``fallback="lstsq"`` a CG solve that does
+    not converge is redone with the direct solver when its design matrix fits
+    in ``LSTSQ_FALLBACK_MAX_BYTES``; the diagnostics then report
+    ``fallback="lstsq"`` (or, when it does not fit, say so in ``message``)."""
     if solver == "lstsq":
         return _solve_inner_cores_lstsq(eri_dev, rotations_dev, xp,
-                                        regularization)
-    if solver == "cg":
-        return _solve_inner_cores_cg(eri_dev, rotations_dev, xp,
-                                     regularization, cg_tolerance,
-                                     cg_max_iterations, initial_guess)
-    raise ValueError("inner_solver must be 'lstsq' or 'cg'.")
+                                        regularization, cg_tolerance)
+    if solver != "cg":
+        raise ValueError("inner_solver must be 'lstsq' or 'cg'.")
+    if fallback not in _INNER_FALLBACKS:
+        raise ValueError(
+            f"inner_fallback must be one of {_INNER_FALLBACKS}, got "
+            f"{fallback!r}.")
+    operator = _InnerOperator(eri_dev, rotations_dev, xp, regularization)
+    cores, diag = _solve_inner_cores_cg(eri_dev,
+                                        rotations_dev,
+                                        xp,
+                                        regularization,
+                                        cg_tolerance,
+                                        cg_max_iterations,
+                                        initial_guess,
+                                        operator=operator)
+    if diag.converged or fallback == "none":
+        return cores, diag
+    design_bytes = lstsq_design_bytes(operator.n, operator.num_leaves)
+    if design_bytes > LSTSQ_FALLBACK_MAX_BYTES:
+        diag.message = (f"{diag.message}; " if diag.message else "") + (
+            f"lstsq fallback skipped: design matrix {design_bytes / 1e9:.2f} "
+            f"GB exceeds {LSTSQ_FALLBACK_MAX_BYTES / 1e9:.2f} GB")
+        return cores, diag
+    cores, direct = _solve_inner_cores_lstsq(eri_dev,
+                                             rotations_dev,
+                                             xp,
+                                             regularization,
+                                             cg_tolerance,
+                                             operator=operator)
+    direct.iterations = diag.iterations
+    direct.fallback = "lstsq"
+    direct.message = (f"cg terminated with {diag.termination} at residual "
+                      f"{diag.residual_norm:.3e} (threshold "
+                      f"{diag.threshold:.3e}); cores from lstsq")
+    return cores, direct
 
 
 def _reconstruct_dev(rotations_dev: DeviceArray, cores_dev: DeviceArray,
@@ -529,6 +850,8 @@ def compressed_double_factorization(
         cg_max_iterations: Optional[int] = None,
         cg_warm_start: bool = True,
         cg_optimization_tolerance: Optional[float] = None,
+        inner_fallback: str = "none",
+        inner_solve_history: bool = False,
         initial_generators: Optional[List[np.ndarray]] = None,
         backend: str = "auto") -> DoubleFactorization:
     """Compressed double factorization (C-DF) by least-squares optimization.
@@ -564,23 +887,42 @@ def compressed_double_factorization(
     (default ``max(cg_tolerance, 1e-6)``) solves the *in-loop* systems only
     loosely (an inexact inner solve; the gradient need only be approximate by
     the envelope theorem) while the single final solve is tightened to
-    ``cg_tolerance``.
+    ``cg_tolerance``. With ``inner_fallback="lstsq"`` a CG solve that does not reach its tolerance is
+    redone with the direct solver when the explicit design matrix fits in
+    ``LSTSQ_FALLBACK_MAX_BYTES``; the default ``"none"`` keeps the CG result
+    and reports it.
 
-    L-BFGS-B status is stored on the returned :class:`DoubleFactorization`
-    (``optimizer_success``, ``optimizer_nit``, ``optimizer_grad_norm``). A
-    ``RuntimeWarning`` is issued if the optimizer does not converge, including
-    when it hits ``max_iterations``; the best factorization found is still
-    returned. When ``n == 1``, there are no free antisymmetric parameters, so
-    each leaf rotation is the identity, the cores are the closed-form solution,
-    and ``optimizer_nit`` is 0.
+    Every inner solve verifies its residual against the operator (see
+    :class:`InnerSolveDiagnostics`), and a solve that misses its tolerance is
+    reported, not hidden. The returned :class:`DoubleFactorization` carries
+    the L-BFGS-B status (``optimizer_success``, ``optimizer_nit``,
+    ``optimizer_status``, ``optimizer_message``, ``optimizer_grad_norm``), the
+    objective recomputed with the final cores (``objective``), the final
+    inner solve's diagnostics (``inner_solve``), and a bounded summary of the
+    in-loop solves (``inner_solve_summary``); ``inner_solve_history=True``
+    additionally keeps every solve's diagnostics. ``converged`` combines the
+    outer and final-inner status.
+
+    Warning policy: at most three ``RuntimeWarning`` s per call -- one if the
+    optimizer does not converge (including when it hits ``max_iterations``),
+    one if the final inner solve misses ``cg_tolerance``, and one summarizing
+    any in-loop solves that missed ``cg_optimization_tolerance``. Individual
+    in-loop misses never warn. In every case the best factorization found is
+    still returned. When ``n == 1``, there are no free antisymmetric
+    parameters, so each leaf rotation is the identity, the cores are the
+    closed-form solution, and ``optimizer_nit`` is 0.
 
     Returns a :class:`DoubleFactorization` with NumPy arrays.
     """
     n = _validate_eri(eri)
     if num_leaves < 1:
         raise ValueError("num_leaves must be >= 1.")
-    if inner_solver not in ("lstsq", "cg"):
+    if inner_solver not in _INNER_SOLVERS:
         raise ValueError("inner_solver must be 'lstsq' or 'cg'.")
+    if inner_fallback not in _INNER_FALLBACKS:
+        raise ValueError(
+            f"inner_fallback must be one of {_INNER_FALLBACKS}, got "
+            f"{inner_fallback!r}.")
     xp, _ = resolve_backend(backend,
                             problem_size=n,
                             gpu_min_size=AUTO_GPU_MIN_ORBITALS_COMPRESSED)
@@ -604,6 +946,23 @@ def compressed_double_factorization(
                       is not None else max(cg_tolerance, 1.0e-6))
     warm_state = {"z": None, "recent": []}
     warm_lru = 3
+    summary = InnerSolveSummary()
+    history: Optional[List[InnerSolveDiagnostics]] = ([] if inner_solve_history
+                                                      else None)
+
+    def solve_cores(rotations, inner_tolerance, guess):
+        cores, diag = _solve_inner_cores(eri_dev,
+                                         rotations,
+                                         xp,
+                                         regularization,
+                                         inner_solver,
+                                         inner_tolerance,
+                                         cg_max_iterations,
+                                         guess,
+                                         fallback=inner_fallback)
+        if history is not None:
+            history.append(diag)
+        return cores, diag
 
     def unpack(parameter_vector):
         # Build all leaf generators, then exponentiate them in one batched
@@ -636,18 +995,16 @@ def compressed_double_factorization(
                         warm_state["recent"].pop(index))
                     break
             if cores is None:
-                cores = _solve_inner_cores(eri_dev, rotations, xp,
-                                           regularization, inner_solver,
-                                           loop_tolerance, cg_max_iterations,
-                                           warm_state["z"])
+                cores, diag = solve_cores(rotations, loop_tolerance,
+                                          warm_state["z"])
+                summary.record(diag)
                 warm_state["z"] = xp.stack(cores)
                 warm_state["recent"].append((key, cores))
                 if len(warm_state["recent"]) > warm_lru:
                     del warm_state["recent"][0]
         else:
-            cores = _solve_inner_cores(eri_dev, rotations, xp, regularization,
-                                       inner_solver, loop_tolerance,
-                                       cg_max_iterations, None)
+            cores, diag = solve_cores(rotations, loop_tolerance, None)
+            summary.record(diag)
         residual = eri_dev - _reconstruct_dev(rotations, cores, xp)
         loss = 0.5 * xp.sum(residual * residual)
         if regularization > 0.0:
@@ -685,6 +1042,8 @@ def compressed_double_factorization(
         optimizer_success = True
         optimizer_nit = 0
         grad_norm = 0.0
+        optimizer_status = 0
+        optimizer_message = "no free parameters (n == 1)"
     else:
         result = scipy.optimize.minimize(objective_and_gradient,
                                          x0,
@@ -709,19 +1068,52 @@ def compressed_double_factorization(
         solved_x = result.x
         optimizer_success = bool(result.success)
         optimizer_nit = int(result.nit)
+        optimizer_status = int(result.status)
+        optimizer_message = str(result.message)
 
     # Final cores at the tight cg_tolerance (warm-started from the last step).
     _, rotations = unpack(solved_x)
-    cores = _solve_inner_cores(eri_dev, rotations, xp, regularization,
-                               inner_solver, cg_tolerance, cg_max_iterations,
-                               warm_state["z"] if use_warm else None)
+    cores, final_diag = solve_cores(rotations, cg_tolerance,
+                                    warm_state["z"] if use_warm else None)
+    if not final_diag.converged:
+        warnings.warn(
+            "double_factorization: the final inner core solve did not reach "
+            f"cg_tolerance={cg_tolerance:g} (solver={final_diag.solver}, "
+            f"preconditioner={final_diag.preconditioner}, termination="
+            f"{final_diag.termination}, iterations={final_diag.iterations}, "
+            f"verified residual {final_diag.residual_norm:.3e} > threshold "
+            f"{final_diag.threshold:.3e}"
+            f"{'; ' + final_diag.message if final_diag.message else ''}); "
+            "the returned cores are approximate -- see "
+            "DoubleFactorization.inner_solve.", RuntimeWarning)
+    if summary.num_unconverged > 0:
+        warnings.warn(
+            f"double_factorization: {summary.num_unconverged} of "
+            f"{summary.num_solves} inner core solves during the optimization "
+            f"missed cg_optimization_tolerance={loop_tolerance:g} (worst "
+            f"residual/threshold {summary.worst_residual_to_threshold:.3g}, "
+            f"terminations {summary.terminations}); the optimizer path may "
+            "be inexact -- see DoubleFactorization.inner_solve_summary.",
+            RuntimeWarning)
+
+    cores_dev = xp.stack(cores)
+    fit_residual = eri_dev - _reconstruct_dev(rotations, cores_dev, xp)
+    objective = 0.5 * xp.sum(fit_residual * fit_residual)
+    if regularization > 0.0:
+        objective = objective + regularization * xp.sum(cores_dev * cores_dev)
     return DoubleFactorization(num_orbitals=n,
                                leaf_rotations=[to_numpy(r) for r in rotations],
                                leaf_cores=[to_numpy(c) for c in cores],
                                method="C-DF",
                                optimizer_success=optimizer_success,
                                optimizer_nit=optimizer_nit,
-                               optimizer_grad_norm=grad_norm)
+                               optimizer_grad_norm=grad_norm,
+                               optimizer_status=optimizer_status,
+                               optimizer_message=optimizer_message,
+                               objective=float(to_numpy(objective)),
+                               inner_solve=final_diag,
+                               inner_solve_summary=summary,
+                               inner_solve_history=history)
 
 
 def reconstruct_eri(factorization: DoubleFactorization) -> np.ndarray:
