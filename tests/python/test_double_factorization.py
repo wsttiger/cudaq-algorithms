@@ -820,7 +820,7 @@ def test_cg_inner_cores_are_zero_for_a_zero_rhs(backend):
 
 
 # --------------------------------------------------------------------------- #
-# Inner-solve diagnostics and verified stopping
+# Inner-solve diagnostics, verified stopping, and the pairwise preconditioner
 # --------------------------------------------------------------------------- #
 
 
@@ -841,6 +841,163 @@ def _inner_setup(backend, eri, num_leaves, rho=0.0):
     rotations_dev = [to_device(u, xp) for u in rotations]
     return xp, eri_dev, rotations_dev, F._InnerOperator(
         eri_dev, rotations_dev, xp, rho)
+
+
+def _dense_operator(op):
+    """Assemble ``A + 2 rho I`` column by column from the matrix-free operator."""
+    from cudaq_algorithms.double_factorization._backend import to_numpy
+    xp = op.xp
+    size = op.num_leaves * op.n * op.n
+    dense = np.zeros((size, size))
+    for column in range(size):
+        unit = np.zeros(size)
+        unit[column] = 1.0
+        z = xp.asarray(unit.reshape(op.num_leaves, op.n, op.n))
+        dense[:, column] = to_numpy(op.apply(z)).reshape(-1)
+    return dense
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+@pytest.mark.parametrize("rho", [1.0e-2, 0.0])
+def test_pairwise_preconditioner_matches_dense_block_jacobi(backend, rho):
+    # Odd leaf count: two paired leaves plus one unpaired leaf kept as its
+    # diagonal block alpha I. The structured inverse must equal the inverse
+    # of the dense block-Jacobi matrix assembled from the operator itself
+    # (rho > 0, no floor active), and must be symmetric positive definite
+    # even at rho = 0 where the pair block is singular along (J, -J).
+    import cudaq_algorithms.double_factorization._factorization as F
+    from cudaq_algorithms.double_factorization._backend import to_numpy
+    eri = _synthetic_eri(n=3, num_vectors=4, seed=2)
+    xp, _, _, op = _inner_setup(backend, eri, num_leaves=3, rho=rho)
+    pre = F._PairwisePreconditioner(op)
+    assert len(pre.pairs) == 1 and len(pre.unpaired) == 1
+    (t, u), = pre.pairs
+    assert t < u
+
+    n = op.n
+    size = 3 * n * n
+    dense = _dense_operator(op)
+    block = np.zeros_like(dense)
+    for a in (t, u):
+        for b in (t, u):
+            block[a * n * n:(a + 1) * n * n,
+                  b * n * n:(b + 1) * n * n] = dense[a * n * n:(a + 1) * n * n,
+                                                     b * n * n:(b + 1) * n * n]
+    w = pre.unpaired[0]
+    block[w * n * n:(w + 1) * n * n,
+          w * n * n:(w + 1) * n * n] = (op.alpha * np.eye(n * n))
+
+    rng = np.random.default_rng(0)
+    vectors = rng.standard_normal((4, size))
+    applied = np.stack([
+        to_numpy(pre.apply(xp.asarray(v.reshape(3, n, n)))).reshape(-1)
+        for v in vectors
+    ])
+    if rho > 0.0:
+        # No eigenvalue reaches the floor: exact block-Jacobi inverse.
+        assert np.min(np.linalg.eigvalsh(block)) > pre.floor
+        expected = np.linalg.solve(block, vectors.T).T
+        assert np.allclose(applied, expected, atol=1.0e-10)
+    # Symmetric: <x, P^-1 y> == <P^-1 x, y>; positive definite on these.
+    gram = vectors @ applied.T
+    assert np.allclose(gram, gram.T, atol=1.0e-10)
+    assert np.all(np.einsum("ij,ij->i", vectors, applied) > 0.0)
+    if rho == 0.0:
+        # The floored direction is the pair null vector (J, -J).
+        null = np.zeros((3, n, n))
+        null[t] = 1.0
+        null[u] = -1.0
+        assert np.linalg.norm(block @ null.reshape(-1)) < 1.0e-10
+        out = to_numpy(pre.apply(xp.asarray(null))).reshape(-1)
+        assert np.allclose(out, null.reshape(-1) / pre.floor, rtol=1.0e-8)
+
+
+def test_pair_leaves_is_greedy_and_deterministic():
+    import cudaq_algorithms.double_factorization._factorization as F
+    scores = np.array([
+        [0.0, 5.0, 1.0, 1.0],
+        [5.0, 0.0, 9.0, 1.0],
+        [1.0, 9.0, 0.0, 1.0],
+        [1.0, 1.0, 1.0, 0.0],
+    ])
+    # Highest score (1, 2) first, then the remaining pair (0, 3).
+    assert F._pair_leaves(scores) == [(1, 2), (0, 3)]
+    # Ties break by index order; an odd leaf is left unpaired.
+    assert F._pair_leaves(np.ones((3, 3))) == [(0, 1)]
+    assert F._pair_leaves(np.ones((1, 1))) == []
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+@pytest.mark.parametrize("rho", [0.0, 1.0e-3])
+def test_pcg_converges_to_the_same_fit_as_plain_cg_and_lstsq(backend, rho):
+    # Three leaves (one unpaired): plain CG, pairwise PCG, and lstsq must
+    # all satisfy the verified criterion and give the same reconstruction.
+    # At rho = 0 the cores are a gauge choice (the design has a null
+    # space), so only the reconstruction is compared.
+    import cudaq_algorithms.double_factorization._factorization as F
+    from cudaq_algorithms.double_factorization._backend import to_numpy
+    eri = _synthetic_eri(n=4, num_vectors=5, seed=9)
+    xp, eri_dev, rotations, op = _inner_setup(backend, eri, 3, rho)
+    results = {}
+    for name, kwargs in [("cg", dict(preconditioner="none")),
+                         ("pcg", dict(preconditioner="pairwise")),
+                         ("pcg-replace",
+                          dict(preconditioner="pairwise",
+                               residual_replacement_interval=2))]:
+        cores, diag = F._solve_inner_cores_cg(eri_dev,
+                                              rotations,
+                                              xp,
+                                              rho,
+                                              tolerance=1.0e-10,
+                                              operator=op,
+                                              **kwargs)
+        assert diag.converged and diag.termination == "converged"
+        assert diag.residual_norm <= diag.threshold
+        assert diag.preconditioner == kwargs["preconditioner"]
+        # The diagnostics' verified residual is the operator residual.
+        assert np.isclose(diag.residual_norm,
+                          op.residual_norm(xp.stack(cores)),
+                          rtol=1.0e-6,
+                          atol=1.0e-14)
+        results[name] = (to_numpy(F._reconstruct_dev(rotations, cores,
+                                                     xp)), diag.iterations)
+    lstsq_cores, lstsq_diag = F._solve_inner_cores_lstsq(eri_dev,
+                                                         rotations,
+                                                         xp,
+                                                         rho,
+                                                         operator=op)
+    assert lstsq_diag.converged and lstsq_diag.termination == "direct"
+    reference = to_numpy(F._reconstruct_dev(rotations, lstsq_cores, xp))
+    for name, (reconstruction, _) in results.items():
+        assert np.linalg.norm(reconstruction - reference) < 1.0e-7, name
+    assert results["pcg"][1] <= results["cg"][1]
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_pcg_handles_identical_leaves_at_zero_regularization(backend):
+    # Two identical leaves make the pair block (and the system) singular in
+    # every direction (W, -W); the floor keeps the preconditioner finite and
+    # PCG still reaches the verified criterion. Plain CG and PCG agree on
+    # the reconstruction; their cores need not agree.
+    import cudaq_algorithms.double_factorization._factorization as F
+    from cudaq_algorithms.double_factorization._backend import (
+        resolve_backend, to_device, to_numpy)
+    eri = _synthetic_eri(n=3, num_vectors=2, seed=4)
+    xp, _ = resolve_backend(backend)
+    eri_dev = to_device(eri, xp)
+    u = np.linalg.qr(np.random.default_rng(1).standard_normal((3, 3)))[0]
+    rotations = [to_device(u, xp), to_device(u.copy(), xp)]
+    reconstructions = []
+    for preconditioner in ("none", "pairwise"):
+        cores, diag = F._solve_inner_cores_cg(eri_dev,
+                                              rotations,
+                                              xp,
+                                              0.0,
+                                              preconditioner=preconditioner)
+        assert diag.converged, diag
+        reconstructions.append(
+            to_numpy(F._reconstruct_dev(rotations, cores, xp)))
+    assert np.linalg.norm(reconstructions[0] - reconstructions[1]) < 1.0e-8
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)
@@ -930,15 +1087,39 @@ def test_cg_reports_curvature_breakdown_and_numerical_failure(backend):
     assert not np.isfinite(diag.residual_norm)
 
 
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_zero_rhs_with_pairwise_preconditioner(backend):
+    import cudaq_algorithms.double_factorization._factorization as F
+    from cudaq_algorithms.double_factorization._backend import (
+        resolve_backend, to_device, to_numpy)
+    xp, _ = resolve_backend(backend)
+    eri_dev = to_device(np.zeros((3, 3, 3, 3)), xp)
+    rotations = [to_device(np.eye(3), xp) for _ in range(3)]
+    cores, diag = F._solve_inner_cores_cg(eri_dev,
+                                          rotations,
+                                          xp,
+                                          preconditioner="pairwise",
+                                          initial_guess=xp.ones((3, 3, 3)))
+    assert diag.termination == "zero_rhs" and diag.converged
+    assert all(np.allclose(to_numpy(c), 0.0) for c in cores)
+
+
 def test_invalid_inner_options_raise():
     import cudaq_algorithms.double_factorization._factorization as F
     eri = _synthetic_eri(n=3, num_vectors=2, seed=1)
+    with pytest.raises(ValueError, match="cg_preconditioner"):
+        df.compressed_double_factorization(eri,
+                                           num_leaves=2,
+                                           inner_solver="cg",
+                                           cg_preconditioner="jacobi")
     with pytest.raises(ValueError, match="inner_fallback"):
         df.compressed_double_factorization(eri,
                                            num_leaves=2,
                                            inner_solver="cg",
                                            inner_fallback="svd")
     xp, eri_dev, rotations, _ = _inner_setup("numpy", eri, 2)
+    with pytest.raises(ValueError, match="preconditioner"):
+        F._solve_inner_cores_cg(eri_dev, rotations, xp, preconditioner="x")
     with pytest.raises(ValueError, match="inner_fallback"):
         F._solve_inner_cores(eri_dev, rotations, xp, solver="cg", fallback="x")
 

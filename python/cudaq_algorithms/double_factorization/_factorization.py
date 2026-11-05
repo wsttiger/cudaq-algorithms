@@ -57,7 +57,8 @@ class InnerSolveDiagnostics:
       residual passed the threshold while the verified residual stopped
       improving (stagnation).
 
-    ``solver`` is ``"cg"`` or ``"lstsq"``; ``preconditioner`` is ``"none"``; ``fallback`` names the direct solver that produced
+    ``solver`` is ``"cg"`` or ``"lstsq"``; ``preconditioner`` is ``"none"``
+    or ``"pairwise"``; ``fallback`` names the direct solver that produced
     the cores when the iterative solve did not converge (``None``
     otherwise), and ``message`` carries free-form detail.
     """
@@ -441,6 +442,93 @@ class _InnerOperator:
         return math.sqrt(float(to_numpy(self.xp.sum(residual * residual))))
 
 
+def _pair_leaves(scores: np.ndarray) -> List[tuple[int, int]]:
+    """Greedy disjoint pairing of leaves by descending ``scores[t, u]``
+    (``t < u``), ties broken by index order. Deterministic."""
+    num_leaves = scores.shape[0]
+    candidates = sorted(((-float(scores[t, u]), t, u)
+                         for t in range(num_leaves)
+                         for u in range(t + 1, num_leaves)))
+    used = [False] * num_leaves
+    pairs = []
+    for _, t, u in candidates:
+        if not used[t] and not used[u]:
+            used[t] = used[u] = True
+            pairs.append((t, u))
+    return pairs
+
+
+class _PairwisePreconditioner:
+    """Pairwise block-Jacobi preconditioner for :class:`_InnerOperator`.
+
+    Leaves are grouped into disjoint pairs ``(t, u)`` by the overlap score
+    ``||M_tu||_F^2`` and the operator restricted to a pair is kept exactly,
+
+        P_tu [X; Y] = [alpha X + M Y M^T ;  M^T X M + alpha Y],  M = M_tu,
+
+    while every coupling across pairs is dropped. With ``M = Q S V^T`` and
+    ``X' = Q^T X Q``, ``Y' = V^T Y V``, the pair block decouples into one
+    2x2 system per entry ``(i, j)`` with matrix ``[[alpha, s_i s_j],
+    [s_i s_j, alpha]]`` and eigenvalues ``alpha +- s_i s_j``, so the inverse
+    is applied in ``O(n^3)`` per pair (four ``n x n`` products) without
+    assembling anything of size ``(T n^2)^2``. An unpaired leaf (odd ``T``)
+    keeps the diagonal block ``alpha I``.
+
+    ``M_tu`` is doubly stochastic, so ``s_i <= 1`` and
+    ``alpha - s_i s_j >= 2 rho``: at ``rho = 0`` the pair block is singular
+    exactly along the design's own null direction ``(J, -J)`` (``J`` the
+    all-ones core), and nearly so for near-identical leaves. Eigenvalues
+    below ``floor * alpha`` are raised to that value, which keeps the applied
+    inverse symmetric positive definite without changing the system being
+    solved.
+    """
+
+    def __init__(self, operator: _InnerOperator, floor: float = 1.0e-6):
+        xp = operator.xp
+        self.xp = xp
+        self.alpha = operator.alpha
+        self.floor = float(floor) * self.alpha
+        num_leaves = operator.num_leaves
+        scores = to_numpy(
+            xp.sum(operator.metric * operator.metric, axis=(2, 3)))
+        self.pairs = _pair_leaves(scores)
+        paired = {leaf for pair in self.pairs for leaf in pair}
+        self.unpaired = [t for t in range(num_leaves) if t not in paired]
+        if self.pairs:
+            self.first = xp.asarray([t for t, _ in self.pairs])
+            self.second = xp.asarray([u for _, u in self.pairs])
+            blocks = operator.metric[self.first, self.second]  # (P, n, n)
+            q, singular_values, vt = xp.linalg.svd(blocks)
+            self.q = q
+            self.v = vt.transpose(0, 2, 1)
+            ss = singular_values[:, :, None] * singular_values[:, None, :]
+            self.inverse_plus = 1.0 / (self.alpha + ss)
+            self.inverse_minus = 1.0 / xp.maximum(self.alpha - ss, self.floor)
+        if self.unpaired:
+            self.unpaired_index = xp.asarray(self.unpaired)
+
+    def apply(self, r: DeviceArray) -> DeviceArray:
+        """``P^{-1} r`` for a stacked ``(T, n, n)`` array."""
+        xp = self.xp
+        out = xp.empty_like(r)
+        if self.pairs:
+            qt = self.q.transpose(0, 2, 1)
+            vt = self.v.transpose(0, 2, 1)
+            x = qt @ r[self.first] @ self.q
+            y = vt @ r[self.second] @ self.v
+            total = (x + y) * self.inverse_plus
+            difference = (x - y) * self.inverse_minus
+            x = 0.5 * (total + difference)
+            y = 0.5 * (total - difference)
+            out[self.first] = self.q @ x @ qt
+            out[self.second] = self.v @ y @ vt
+        if self.unpaired:
+            out[self.unpaired_index] = r[self.unpaired_index] / self.alpha
+        return out
+
+
+_PRECONDITIONERS = ("none", "pairwise")
+
 # Default CG iteration cap as a multiple of the system dimension
 # ``num_leaves * n^2`` (the count exact arithmetic needs at most).
 CG_ITERATION_CAP_FACTOR = 1
@@ -458,10 +546,12 @@ def _solve_inner_cores_cg(
     tolerance: float = 1.0e-10,
     max_iterations: Optional[int] = None,
     initial_guess: Optional[DeviceArray] = None,
+    preconditioner: str = "none",
+    preconditioner_floor: float = 1.0e-6,
     residual_replacement_interval: Optional[int] = None,
     operator: Optional[_InnerOperator] = None,
 ) -> tuple[List[DeviceArray], InnerSolveDiagnostics]:
-    """Matrix-free conjugate-gradient solve for the
+    """Matrix-free (preconditioned) conjugate-gradient solve for the
     symmetric cores ``{Z^t}``: ``(A + 2 rho I) Z = R`` with the operator of
     :class:`_InnerOperator`, never forming the ``n^4 x num_params`` design
     matrix. The cores are stacked into one ``(num_leaves, n, n)`` array so a
@@ -481,6 +571,8 @@ def _solve_inner_cores_cg(
     ``max_iterations`` defaults to ``CG_ITERATION_CAP_FACTOR`` times the
     system dimension ``num_leaves * n^2``; an explicit value is used as given.
     ``initial_guess`` (a stacked ``(num_leaves, n, n)`` array) warm-starts CG.
+    ``preconditioner="pairwise"`` applies :class:`_PairwisePreconditioner`
+    (eigenvalue floor ``preconditioner_floor``); ``"none"`` is plain CG.
     ``operator`` reuses an already-built :class:`_InnerOperator`.
 
     Returns ``(cores, diagnostics)``. The cores are returned with their
@@ -488,6 +580,10 @@ def _solve_inner_cores_cg(
     curvature breakdown, or stagnation is reported, not raised, and
     ``diagnostics.converged`` says whether the criterion was met.
     """
+    if preconditioner not in _PRECONDITIONERS:
+        raise ValueError(
+            f"preconditioner must be one of {_PRECONDITIONERS}, got "
+            f"{preconditioner!r}.")
     op = operator if operator is not None else _InnerOperator(
         eri_dev, rotations_dev, xp, regularization)
     n, num_leaves = op.n, op.num_leaves
@@ -499,7 +595,7 @@ def _solve_inner_cores_cg(
         converged = residual_norm <= threshold
         return InnerSolveDiagnostics(
             solver="cg",
-            preconditioner="none",
+            preconditioner=preconditioner,
             converged=converged,
             termination="converged" if converged else termination,
             iterations=iterations,
@@ -520,7 +616,7 @@ def _solve_inner_cores_cg(
         z = xp.zeros((num_leaves, n, n))
         return [z[t] for t in range(num_leaves)
                 ], InnerSolveDiagnostics(solver="cg",
-                                         preconditioner="none",
+                                         preconditioner=preconditioner,
                                          converged=True,
                                          termination="zero_rhs",
                                          iterations=0,
@@ -528,6 +624,10 @@ def _solve_inner_cores_cg(
                                          threshold=0.0,
                                          rhs_norm=0.0,
                                          tolerance=float(tolerance))
+
+    apply_preconditioner = (_PairwisePreconditioner(op,
+                                                    preconditioner_floor).apply
+                            if preconditioner == "pairwise" else None)
 
     if initial_guess is None:
         z = xp.zeros((num_leaves, n, n))
@@ -537,8 +637,10 @@ def _solve_inner_cores_cg(
         residual = op.residual(z)
 
     def restart(residual):
-        norm_sq = inner_product(residual, residual)
-        return residual.copy(), norm_sq, norm_sq
+        preconditioned = (apply_preconditioner(residual)
+                          if apply_preconditioner else residual)
+        return (preconditioned.copy(), inner_product(residual, preconditioned),
+                inner_product(residual, residual))
 
     direction, residual_dot, residual_norm_sq = restart(residual)
     threshold_sq = threshold * threshold
@@ -595,11 +697,13 @@ def _solve_inner_cores_cg(
             residual = op.residual(z)
         else:
             residual = residual - step * operator_direction
-        new_dot = inner_product(residual, residual)
+        preconditioned = (apply_preconditioner(residual)
+                          if apply_preconditioner else residual)
+        new_dot = inner_product(residual, preconditioned)
         beta = new_dot / residual_dot  # device scalar
-        direction = residual + beta * direction
+        direction = preconditioned + beta * direction
         residual_dot = new_dot
-        residual_norm_sq = new_dot
+        residual_norm_sq = inner_product(residual, residual)
 
     z = symmetrize(z)
     return [z[t]
@@ -719,6 +823,7 @@ def _solve_inner_cores(
     cg_tolerance: float = 1.0e-10,
     cg_max_iterations: Optional[int] = None,
     initial_guess: Optional[DeviceArray] = None,
+    preconditioner: str = "none",
     fallback: str = "none",
 ) -> tuple[List[DeviceArray], InnerSolveDiagnostics]:
     """Dispatch the inner core solve to the explicit ``"lstsq"`` solver or the
@@ -744,6 +849,7 @@ def _solve_inner_cores(
                                         cg_tolerance,
                                         cg_max_iterations,
                                         initial_guess,
+                                        preconditioner=preconditioner,
                                         operator=operator)
     if diag.converged or fallback == "none":
         return cores, diag
@@ -759,6 +865,7 @@ def _solve_inner_cores(
                                              regularization,
                                              cg_tolerance,
                                              operator=operator)
+    direct.preconditioner = preconditioner
     direct.iterations = diag.iterations
     direct.fallback = "lstsq"
     direct.message = (f"cg terminated with {diag.termination} at residual "
@@ -850,6 +957,7 @@ def compressed_double_factorization(
         cg_max_iterations: Optional[int] = None,
         cg_warm_start: bool = True,
         cg_optimization_tolerance: Optional[float] = None,
+        cg_preconditioner: str = "none",
         inner_fallback: str = "none",
         inner_solve_history: bool = False,
         initial_generators: Optional[List[np.ndarray]] = None,
@@ -887,7 +995,10 @@ def compressed_double_factorization(
     (default ``max(cg_tolerance, 1e-6)``) solves the *in-loop* systems only
     loosely (an inexact inner solve; the gradient need only be approximate by
     the envelope theorem) while the single final solve is tightened to
-    ``cg_tolerance``. With ``inner_fallback="lstsq"`` a CG solve that does not reach its tolerance is
+    ``cg_tolerance``. ``cg_preconditioner`` selects ``"none"`` (plain CG) or
+    ``"pairwise"`` (pairwise block-Jacobi preconditioning, which captures the
+    coupling between the most-overlapping leaf pairs exactly). With
+    ``inner_fallback="lstsq"`` a CG solve that does not reach its tolerance is
     redone with the direct solver when the explicit design matrix fits in
     ``LSTSQ_FALLBACK_MAX_BYTES``; the default ``"none"`` keeps the CG result
     and reports it.
@@ -919,6 +1030,10 @@ def compressed_double_factorization(
         raise ValueError("num_leaves must be >= 1.")
     if inner_solver not in _INNER_SOLVERS:
         raise ValueError("inner_solver must be 'lstsq' or 'cg'.")
+    if cg_preconditioner not in _PRECONDITIONERS:
+        raise ValueError(
+            f"cg_preconditioner must be one of {_PRECONDITIONERS}, got "
+            f"{cg_preconditioner!r}.")
     if inner_fallback not in _INNER_FALLBACKS:
         raise ValueError(
             f"inner_fallback must be one of {_INNER_FALLBACKS}, got "
@@ -959,6 +1074,7 @@ def compressed_double_factorization(
                                          inner_tolerance,
                                          cg_max_iterations,
                                          guess,
+                                         preconditioner=cg_preconditioner,
                                          fallback=inner_fallback)
         if history is not None:
             history.append(diag)
