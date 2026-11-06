@@ -1305,3 +1305,124 @@ def test_lstsq_retries_with_scipy_when_the_backend_solver_fails(monkeypatch):
     assert diag.converged and diag.termination == "direct"
     for core, expected in zip(cores, reference):
         assert np.allclose(core, expected, atol=1.0e-8)
+
+
+# --------------------------------------------------------------------------- #
+# Molecular reference cases
+# --------------------------------------------------------------------------- #
+
+
+def _h8_sto6g_chain(tmp_path):
+    """Linear H8, STO-6G, 1.4 bohr spacing, RHF orbitals, via an FCIDUMP
+    written by PySCF and read back by the package's own reader. Returns
+    ``(mean_field, one_body, eri, core_energy)``."""
+    pytest.importorskip("pyscf")
+    from pyscf import gto, scf, tools
+    mol = gto.M(atom=[("H", (0, 0, 1.4 * i)) for i in range(8)],
+                basis="sto-6g",
+                unit="Bohr",
+                verbose=0)
+    mf = scf.RHF(mol).run()
+    assert mf.converged
+    path = tmp_path / "H8_sto6g_d1.4.fcidump"
+    tools.fcidump.from_scf(mf, str(path))
+    one_body, eri, core = algorithms.chemistry.from_fcidump(path.read_text())
+    return mf, one_body, eri, core
+
+
+def test_h8_sto6g_fcidump_round_trips_through_from_pyscf(tmp_path):
+    mf, one_body, eri, core = _h8_sto6g_chain(tmp_path)
+    one_body_ref, eri_ref, core_ref = algorithms.chemistry.from_pyscf(mf)
+    # FCIDUMP text carries ~16 significant digits.
+    assert np.allclose(one_body, one_body_ref, atol=1.0e-12)
+    assert np.allclose(eri, eri_ref, atol=1.0e-12)
+    assert abs(core - core_ref) < 1.0e-10
+    assert eri.shape == (8, 8, 8, 8)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_h8_sto6g_inner_solve_reports_the_old_budget_and_meets_the_new(
+        backend, tmp_path):
+    # The reported failure, pinned: at zero regularization the H8 chain's
+    # inner system needs more CG iterations than the system dimension
+    # T n^2. With that budget the solve must say so; with the default
+    # budget (CG_ITERATION_CAP_FACTOR x) and with rho = 1e-3 it must meet
+    # the verified criterion.
+    import cudaq_algorithms.double_factorization._factorization as F
+    _, _, eri, _ = _h8_sto6g_chain(tmp_path)
+    num_leaves = 8
+    xp, eri_dev, rotations, _ = _inner_setup(backend, eri, num_leaves, 0.0)
+    old_budget = num_leaves * 8 * 8
+    _, capped = F._solve_inner_cores_cg(eri_dev,
+                                        rotations,
+                                        xp,
+                                        0.0,
+                                        tolerance=1.0e-10,
+                                        max_iterations=old_budget)
+    assert capped.converged is False
+    assert capped.termination == "max_iterations"
+    assert capped.iterations == old_budget
+    assert capped.residual_norm > 10.0 * capped.threshold
+    _, default = F._solve_inner_cores_cg(eri_dev,
+                                         rotations,
+                                         xp,
+                                         0.0,
+                                         tolerance=1.0e-10)
+    assert default.converged, default
+    assert old_budget < default.iterations <= F._default_cg_iteration_cap(
+        num_leaves, 8)
+    _, regularized = F._solve_inner_cores_cg(eri_dev,
+                                             rotations,
+                                             xp,
+                                             1.0e-3,
+                                             tolerance=1.0e-10)
+    assert regularized.converged
+    assert regularized.iterations < default.iterations
+
+
+def _femoco_reiher():
+    """Reiher FeMoco CAS(54e, 54o) integrals from OpenFermion's shipped
+    ``eri_reiher.h5`` (read with h5py; no resource-estimate extras needed)."""
+    h5py = pytest.importorskip("h5py")
+    openfermion = pytest.importorskip("openfermion")
+    import pathlib
+    path = (pathlib.Path(openfermion.__file__).parent / "resource_estimates" /
+            "integrals" / "eri_reiher.h5")
+    if not path.exists():
+        pytest.skip("eri_reiher.h5 not shipped with this OpenFermion")
+    with h5py.File(path, "r") as f:
+        return (np.asarray(f["eri"][()], dtype=float),
+                np.asarray(f["h0"][()], dtype=float), float(f["ecore"][()]))
+
+
+def test_femoco_reiher_integrals_are_in_convention_and_solve_reports():
+    # FeMoco is the large reference case. CI only checks that the shipped
+    # integrals are what double_factorization expects and that one bounded
+    # inner solve on an X-DF start returns self-consistent diagnostics; no
+    # convergence is asserted at this size.
+    import cudaq_algorithms.double_factorization._factorization as F
+    eri, one_body, core = _femoco_reiher()
+    assert eri.shape == (54, 54, 54, 54) and one_body.shape == (54, 54)
+    assert np.allclose(eri, eri.transpose(1, 0, 2, 3))
+    assert np.allclose(eri, eri.transpose(0, 1, 3, 2))
+    assert np.allclose(eri, eri.transpose(2, 3, 0, 1))
+    assert core < -13000.0  # frozen-core + nuclear constant of the CAS
+    xdf = df.explicit_double_factorization(eri,
+                                           threshold=0.0,
+                                           max_num_leaves=8,
+                                           backend="numpy")
+    assert xdf.num_leaves == 8
+    rotations = [np.asarray(u) for u in xdf.leaf_rotations]
+    for rho in (0.0, 1.0e-3):
+        cores, diag = F._solve_inner_cores_cg(eri,
+                                              rotations,
+                                              np,
+                                              rho,
+                                              tolerance=1.0e-10,
+                                              max_iterations=2000)
+        assert diag.rhs_norm > 0.0 and diag.threshold > 0.0
+        assert diag.converged == (diag.residual_norm <= diag.threshold)
+        assert diag.termination in ("converged", "max_iterations")
+        assert len(cores) == 8 and cores[0].shape == (54, 54)
+        if rho > 0.0:
+            assert diag.converged, diag

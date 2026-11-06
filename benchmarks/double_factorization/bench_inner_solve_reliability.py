@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pathlib
 import platform
 import sys
 import time
@@ -138,6 +139,18 @@ CASES = {
 }
 DEFAULT_CASES = ("synthetic-exact-n4,synthetic-compressed-n8,H4-sto3g,"
                  "H6-sto3g,H8-sto3g,H2O-sto3g,H2O-631g")
+
+# Molecular reference cases (hydrogen chains in STO-6G, FeMoco): built and
+# cached by reference_cases.py, which lives beside this script.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import reference_cases  # noqa: E402
+
+REFERENCE_CACHE_DIR = reference_cases.DEFAULT_CACHE_DIR
+for _name, (_loader, _leaf_counts) in reference_cases.REFERENCE_CASES.items():
+    CASES[_name] = ((lambda loader=_loader:
+                     (lambda case: (case.eri, case.one_body_eigenvalues))
+                     (loader(REFERENCE_CACHE_DIR))), _leaf_counts)
+REFERENCE_CASE_NAMES = ",".join(reference_cases.REFERENCE_CASES)
 
 
 def load_case(name):
@@ -413,12 +426,19 @@ def run_fits(case_name, eri, one_body_eigenvalues, leaf_counts, backend_names,
 
 
 def main():
+    global REFERENCE_CACHE_DIR
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--inner", action="store_true")
     parser.add_argument("--fits", action="store_true")
-    parser.add_argument("--cases", default=DEFAULT_CASES)
+    parser.add_argument("--cases",
+                        default=DEFAULT_CASES,
+                        help=f"comma list; molecular reference cases: "
+                        f"{REFERENCE_CASE_NAMES}")
+    parser.add_argument("--reference-cache-dir",
+                        default=str(REFERENCE_CACHE_DIR),
+                        help="where reference_cases.py caches FCIDUMP files")
     parser.add_argument("--backends",
                         default="all",
                         help="comma list or 'all' (CuPy first when usable)")
@@ -439,6 +459,7 @@ def main():
     if not (args.inner or args.fits):
         args.inner = args.fits = True
 
+    REFERENCE_CACHE_DIR = pathlib.Path(args.reference_cache_dir)
     env = environment()
     print("environment:", json.dumps(env))
     print("command:", " ".join(sys.argv))
