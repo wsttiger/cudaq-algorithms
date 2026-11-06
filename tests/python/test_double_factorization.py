@@ -1287,3 +1287,21 @@ def test_inner_solve_summary_record():
     assert summary.total_iterations == 9 and summary.max_iterations == 7
     assert summary.worst_residual_to_threshold == 3.0
     assert summary.terminations == {"max_iterations": 1, "converged": 1}
+
+
+def test_lstsq_retries_with_scipy_when_the_backend_solver_fails(monkeypatch):
+    # LAPACK gelsd can fail to converge on the rank-deficient rho = 0
+    # design; the solve must then come from SciPy's gelss, not an exception.
+    import cudaq_algorithms.double_factorization._factorization as F
+    eri = _synthetic_eri(n=4, num_vectors=5, seed=9)
+    xp, eri_dev, rotations, op = _inner_setup("numpy", eri, 3)
+    reference, _ = F._solve_inner_cores_lstsq(eri_dev, rotations, xp)
+
+    def failing(*args, **kwargs):
+        raise np.linalg.LinAlgError("SVD did not converge")
+
+    monkeypatch.setattr(np.linalg, "lstsq", failing)
+    cores, diag = F._solve_inner_cores_lstsq(eri_dev, rotations, xp)
+    assert diag.converged and diag.termination == "direct"
+    for core, expected in zip(cores, reference):
+        assert np.allclose(core, expected, atol=1.0e-8)

@@ -312,8 +312,9 @@ linear solve for fixed rotations. Two solvers are available via
   ``A(Z)^t = sum_{t'} M_{tt'} Z^{t'} M_{tt'}^T`` with
   ``M_{tt'} = (U^t^T U^{t'})`` elementwise-squared — only ``n x n`` matrix
   products, never materializing the design matrix — so it scales to large
-  orbital counts. `cg_tolerance` and `cg_max_iterations` control the CG
-  iteration.
+  orbital counts. `cg_tolerance` (relative to ``||R||_F``) and
+  `cg_max_iterations` (default ``CG_ITERATION_CAP_FACTOR`` times the
+  system dimension ``num_leaves * n^2``) control the CG iteration.
 
 Both solvers produce the same reconstruction; when the inner system is full
 rank (e.g. ``regularization > 0``) they produce the same cores to machine
@@ -337,15 +338,88 @@ accuracy:
   `cg_tolerance`. So the returned cores are accurate even though the
   optimization steps used a cheap inner solve.
 
+Preconditioning. ``cg_preconditioner="pairwise"`` applies a **pairwise
+block-Jacobi** preconditioner: leaves are grouped into disjoint pairs by
+their overlap ``||M_tu||_F^2``, the operator restricted to each pair is
+inverted exactly (a singular value decomposition of ``M_tu`` reduces it to
+``2 x 2`` solves), and every coupling across pairs is dropped. It is built
+once per inner solve, costs about half a plain CG iteration to apply, and
+cuts the iteration count where the coupling is dominated by leaf pairs;
+systems whose coupling spans many leaves gain little from it. The default
+``"none"`` is plain CG.
+
+Inner-solve contract and diagnostics
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Every inner solve — in the loop and at the end — is judged by one verified
+criterion: the **true** normal-equation residual
+``||R - (A + 2 rho I) Z||_F`` of the returned (symmetrized) cores,
+recomputed from the operator, must be at most ``tolerance * ||R||_F``. The
+conjugate-gradient recurrence only *triggers* that check; if its
+recursively updated residual has drifted from the true one, the true
+residual is substituted and iteration continues. A zero right-hand side
+returns zero cores immediately. An exhausted iteration cap, a search
+direction with non-positive curvature, a non-finite quantity, or
+stagnation ends the solve with the cores found so far — reported, not
+raised. The direct ``"lstsq"`` solver is held to the looser of
+`cg_tolerance` and ``LSTSQ_RESIDUAL_TOLERANCE`` (``1e-8``): it minimizes
+the least-squares fit exactly, and on singular ``rho = 0`` systems its
+normal-equation residual lands near ``1e-9`` relative.
+
+At ``rho = 0`` the inner system is singular (the all-ones core direction
+``(J, -J)`` of any two leaves is a null vector of the design, and
+molecular integrals add many near-null directions), so the cores are
+determined only up to that null space. Plain CG from a zero start returns
+the minimum-norm representative; warm starts and the pairwise
+preconditioner return other representatives. The reconstruction,
+objective, and verified residual are the same for all of them; the
+one-norm is not, so compare one-norms across solver settings only at
+``rho > 0`` or with the same solver path.
+
+The result records what happened:
+
+- ``optimizer_success``, ``optimizer_nit``, ``optimizer_status``,
+  ``optimizer_message``: the L-BFGS-B outcome. ``optimizer_grad_norm`` is
+  the gradient at the last optimizer evaluation, i.e. measured with the
+  loose in-loop inner solve.
+- ``objective``: ``1/2 ||eri - recon||_F^2 + rho ||Z||_F^2`` recomputed
+  with the returned cores (the tight final solve).
+- ``inner_solve``: an :class:`~cudaq_algorithms.double_factorization.InnerSolveDiagnostics`
+  for the final solve — solver, preconditioner, ``converged``,
+  ``termination`` (``"converged"``, ``"zero_rhs"``, ``"direct"``,
+  ``"max_iterations"``, ``"curvature_breakdown"``,
+  ``"numerical_failure"``), ``iterations``, the verified
+  ``residual_norm`` and its ``threshold``, and ``fallback`` when the
+  direct solver supplied the cores.
+- ``inner_solve_summary``: an :class:`~cudaq_algorithms.double_factorization.InnerSolveSummary`
+  over the in-loop solves (counts, iterations, worst
+  ``residual / threshold``, termination tally). ``inner_solve_history=True``
+  keeps every solve's diagnostics.
+- ``converged``: ``optimizer_success`` and ``inner_solve.converged``
+  together. A factorization with ``converged == False`` is still returned
+  and still usable as a starting point, but its reconstruction error and
+  one-norm describe an unconverged fit.
+
+Warnings follow a fixed policy — at most three ``RuntimeWarning`` s per
+call: one if the optimizer does not converge, one if the final inner solve
+misses `cg_tolerance`, and one summarizing in-loop solves that missed
+`cg_optimization_tolerance`. Individual in-loop misses never warn.
+
+When the explicit design matrix is small enough
+(``lstsq_design_bytes(n, num_leaves) <= LSTSQ_FALLBACK_MAX_BYTES``, 1 GiB),
+``inner_fallback="lstsq"`` redoes any unconverged CG solve with the direct
+solver and records ``fallback="lstsq"``; above that bound the CG result is
+kept and the diagnostics say the fallback was skipped.
+
 API
 ~~~
 
 All functions return or operate on a
 :class:`~cudaq_algorithms.double_factorization.DoubleFactorization`
 dataclass with `num_orbitals`, `leaf_rotations` (:math:`U^t`),
-`leaf_cores` (:math:`Z^t`), `num_leaves`, and a `reconstruct_eri` method.
-C-DF also fills `optimizer_success`, `optimizer_nit`, and
-`optimizer_grad_norm` from L-BFGS-B.
+`leaf_cores` (:math:`Z^t`), `num_leaves`, a `reconstruct_eri` method, and
+the C-DF diagnostics above (`optimizer_*`, `objective`, `inner_solve`,
+`inner_solve_summary`, `converged`).
 Full signatures and parameter documentation live in the
 :doc:`Python API reference <../api/python_api>`.
 
@@ -357,7 +431,16 @@ Full signatures and parameter documentation live in the
 :func:`~cudaq_algorithms.double_factorization.compressed_double_factorization`
     C-DF by least-squares optimization (warm-started from X-DF).
     ``regularization=rho>0`` enables **RC-DF** (see above);
-    ``inner_solver="cg"`` selects the matrix-free inner core solve.
+    ``inner_solver="cg"`` selects the matrix-free inner core solve,
+    ``cg_preconditioner="pairwise"`` its preconditioner, and
+    ``inner_fallback="lstsq"`` the direct fallback.
+
+:class:`~cudaq_algorithms.double_factorization.InnerSolveDiagnostics`
+    Verified outcome of the final inner core solve carried by a C-DF
+    result (``inner_solve``).
+
+:class:`~cudaq_algorithms.double_factorization.InnerSolveSummary`
+    Bounded summary of the in-loop inner solves (``inner_solve_summary``).
 
 :func:`~cudaq_algorithms.double_factorization.reconstruct_eri`
     Rebuild the ``(pq|rs)`` tensor from a factorization.

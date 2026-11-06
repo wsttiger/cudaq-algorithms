@@ -530,8 +530,12 @@ class _PairwisePreconditioner:
 _PRECONDITIONERS = ("none", "pairwise")
 
 # Default CG iteration cap as a multiple of the system dimension
-# ``num_leaves * n^2`` (the count exact arithmetic needs at most).
-CG_ITERATION_CAP_FACTOR = 1
+# ``num_leaves * n^2``. Exact arithmetic needs at most the dimension; in
+# float64 the ill-conditioned (small ``rho``) molecular systems lose
+# conjugacy and need several times that (up to ~7x the dimension measured
+# on H8/STO-3G at ``rho = 0``), so the default budget is ten times the
+# dimension. Converging solves stop early; only failing ones use it all.
+CG_ITERATION_CAP_FACTOR = 10
 
 
 def _default_cg_iteration_cap(num_leaves: int, n: int) -> int:
@@ -711,6 +715,26 @@ def _solve_inner_cores_cg(
                                                      termination, message)
 
 
+def _lstsq(design: DeviceArray, target: DeviceArray,
+           xp: ArrayModule) -> DeviceArray:
+    """Minimum-norm least-squares solution of ``design @ x ~= target``.
+
+    The backend's ``lstsq`` (LAPACK ``gelsd`` under NumPy) occasionally
+    fails to converge on the rank-deficient ``rho = 0`` design matrices
+    (observed on H8/STO-3G at 8 leaves). The solve is then repeated on the
+    host with SciPy's ``gelss`` driver, whose one-sided Jacobi-free SVD is
+    slower but does not share that failure; if that also fails the error
+    propagates.
+    """
+    try:
+        return xp.linalg.lstsq(design, target, rcond=None)[0]
+    except (np.linalg.LinAlgError, RuntimeError, ValueError):
+        solution = scipy.linalg.lstsq(to_numpy(design),
+                                      to_numpy(target),
+                                      lapack_driver="gelss")[0]
+        return to_device(solution, xp)
+
+
 def _solve_inner_cores_lstsq(
     eri_dev: DeviceArray,
     rotations_dev: DeviceArray,
@@ -764,7 +788,7 @@ def _solve_inner_cores_lstsq(
         design = xp.concatenate([design, xp.diag(penalty)], axis=0)
         target = xp.concatenate([target, xp.zeros(penalty.shape[0])], axis=0)
 
-    solution = xp.linalg.lstsq(design, target, rcond=None)[0]
+    solution = _lstsq(design, target, xp)
 
     cores = [xp.zeros((n, n)) for _ in rotations_dev]
     for index, (leaf_index, k, l) in enumerate(metadata):

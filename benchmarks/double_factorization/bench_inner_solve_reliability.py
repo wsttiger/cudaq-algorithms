@@ -330,18 +330,37 @@ def run_fits(case_name, eri, one_body_eigenvalues, leaf_counts, backend_names,
                                   cg_preconditioner=preconditioner,
                                   inner_fallback=fallback,
                                   backend=backend)
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore", RuntimeWarning)
-                        # Untimed warm-up (tiny budget) on this backend.
-                        df.compressed_double_factorization(
-                            eri, **{
-                                **kwargs, "max_iterations": 1
-                            })
-                        _sync(xp)
-                        start = time.perf_counter()
-                        fit = df.compressed_double_factorization(eri, **kwargs)
-                        _sync(xp)
-                        elapsed = time.perf_counter() - start
+                    try:
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore", RuntimeWarning)
+                            # Untimed warm-up (tiny budget) on this backend.
+                            df.compressed_double_factorization(
+                                eri, **{
+                                    **kwargs, "max_iterations": 1
+                                })
+                            _sync(xp)
+                            start = time.perf_counter()
+                            fit = df.compressed_double_factorization(
+                                eri, **kwargs)
+                            _sync(xp)
+                            elapsed = time.perf_counter() - start
+                    except Exception as error:  # record, keep going
+                        print(f"  {backend:7} {num_leaves:>3} {rho:>7g} "
+                              f"{solver:6} {preconditioner:8} {fallback:6} | "
+                              f"ERROR {type(error).__name__}: {error}")
+                        emit({
+                            "experiment": "fit",
+                            "case": case_name,
+                            "n": n,
+                            "num_leaves": num_leaves,
+                            "backend": backend,
+                            "rho": rho,
+                            "solver": solver,
+                            "preconditioner": preconditioner,
+                            "fallback": fallback,
+                            "error": f"{type(error).__name__}: {error}",
+                        })
+                        continue
                     rel_error = df.factorization_error(eri, fit) / norm
                     lam = df.double_factorization_one_norm(
                         fit, one_body_eigenvalues, "lcu")
