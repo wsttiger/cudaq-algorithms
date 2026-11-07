@@ -36,6 +36,12 @@ from ._backend import (AUTO_GPU_MIN_ORBITALS_COMPRESSED,
                        AUTO_GPU_MIN_ORBITALS_EXPLICIT, ArrayModule,
                        DeviceArray, expm_skew_symmetric_batched,
                        resolve_backend, to_device, to_numpy)
+from ._joint import (OPTIMIZATION_STRATEGIES, STRATEGY_JOINT_GRADIENT_DESCENT,
+                     STRATEGY_VARIABLE_PROJECTION,
+                     JointGradientDescentDiagnostics,
+                     JointGradientDescentOptions, default_initial_cores,
+                     pack_skew, pack_symmetric_stack,
+                     run_joint_gradient_descent, validate_stack)
 
 
 @dataclass
@@ -128,13 +134,19 @@ class DoubleFactorization:
     ``(num_orbitals, num_orbitals)``) and ``leaf_cores[t]`` is the symmetric
     core ``Z^t`` for leaf ``t``. ``method`` is ``"X-DF"`` or ``"C-DF"``.
 
-    C-DF fills the optimizer and inner-solve diagnostics (all ``None`` on
-    X-DF):
+    C-DF fills the optimizer diagnostics (all ``None`` on X-DF).
+    ``optimization_strategy`` names the C-DF strategy that produced the
+    result: ``"variable_projection"`` (rotations optimized by L-BFGS-B with
+    the cores solved at each step) or ``"joint_gradient_descent"``
+    (rotations and cores updated together by gradient descent).
+
+    Variable projection:
 
     - ``optimizer_success``, ``optimizer_nit``, ``optimizer_status``,
       ``optimizer_message`` come from the L-BFGS-B result;
-      ``optimizer_grad_norm`` is the gradient norm at the last optimizer
-      evaluation, i.e. measured with the *in-loop* (loose) inner solve.
+      ``optimizer_grad_norm`` is the Euclidean norm of the rotation
+      gradient at the last optimizer evaluation, i.e. measured with the
+      *in-loop* (loose) inner solve.
     - ``objective`` is the fitting objective ``1/2 ||eri - recon||_F^2 +
       rho ||Z||_F^2`` recomputed with the returned cores (the final, tight
       inner solve).
@@ -147,6 +159,22 @@ class DoubleFactorization:
     When ``n == 1``, no optimization runs, so ``optimizer_success`` is
     ``True``, ``optimizer_nit`` is ``0``, and ``optimizer_grad_norm`` is
     ``0.0``.
+
+    Joint gradient descent:
+
+    - ``optimizer_success`` is the complete joint convergence rule (finite
+      state, both packed gradient blocks within ``tolerance``, verified
+      conditional-core residual within its tolerance); ``optimizer_nit``
+      counts accepted simultaneous updates; ``optimizer_status`` and
+      ``optimizer_message`` encode the termination reason;
+      ``optimizer_grad_norm`` is the Euclidean norm of the full packed
+      ``(X, Z)`` gradient recomputed at the returned state.
+    - ``objective`` is recomputed at the returned state.
+    - ``joint`` is the :class:`JointGradientDescentDiagnostics` (block
+      gradient infinity norms, conditional-core residual, counters,
+      termination); ``inner_solve``, ``inner_solve_summary`` and
+      ``inner_solve_history`` stay ``None`` because no inner core solve
+      runs.
     """
 
     num_orbitals: int
@@ -166,6 +194,8 @@ class DoubleFactorization:
     inner_solve: Optional[InnerSolveDiagnostics] = None
     inner_solve_summary: Optional[InnerSolveSummary] = None
     inner_solve_history: Optional[List[InnerSolveDiagnostics]] = None
+    optimization_strategy: Optional[str] = None
+    joint: Optional[JointGradientDescentDiagnostics] = None
 
     @property
     def num_leaves(self) -> int:
@@ -175,11 +205,14 @@ class DoubleFactorization:
     def converged(self) -> bool:
         """``True`` when every iterative stage met its criterion: the outer
         optimizer reported success and the final inner solve's verified
-        residual is within its threshold. X-DF has no iterative stage and
-        is always ``True``."""
+        residual is within its threshold (variable projection), or the
+        complete joint convergence rule held (joint gradient descent). X-DF
+        has no iterative stage and is always ``True``."""
         if self.optimizer_success is False:
             return False
         if self.inner_solve is not None and not self.inner_solve.converged:
+            return False
+        if self.joint is not None and not self.joint.success:
             return False
         return True
 
@@ -1219,14 +1252,41 @@ def compressed_double_factorization(
         *,
         cg_preconditioner: str = "none",
         inner_fallback: str = "none",
-        inner_solve_history: bool = False) -> DoubleFactorization:
+        inner_solve_history: bool = False,
+        optimization_strategy: str = STRATEGY_VARIABLE_PROJECTION,
+        joint_options: Optional[JointGradientDescentOptions] = None,
+        initial_cores: Optional[List[np.ndarray]] = None
+) -> DoubleFactorization:
     """Compressed double factorization (C-DF) by least-squares optimization.
 
     Minimizes ``O = 1/2 || eri - sum_t U^t Z^t (U^t)^T (congruence) ||_F^2`` over
-    a fixed number of leaves. Uses the two-step scheme of arXiv:2104.08957: the
-    leaf rotations are parameterized as ``U^t = exp(X^t)`` with antisymmetric
-    ``X^t`` and optimized with L-BFGS (warm-started from X-DF), while the
-    symmetric cores ``Z^t`` are solved exactly in closed form at each step.
+    a fixed number of leaves. The default strategy
+    (``optimization_strategy="variable_projection"``) is the two-step
+    scheme of arXiv:2104.08957: the leaf rotations are parameterized as
+    ``U^t = exp(X^t)`` with antisymmetric ``X^t`` and optimized with L-BFGS
+    (warm-started from X-DF), while the symmetric cores ``Z^t`` are solved
+    exactly in closed form at each step.
+
+    ``optimization_strategy="joint_gradient_descent"`` instead updates the
+    generators ``X^t`` and the cores ``Z^t`` together by full-batch gradient
+    descent with Armijo backtracking on the same objective, with no inner
+    core solve at any point (see :class:`JointGradientDescentOptions` and
+    :class:`JointGradientDescentDiagnostics`). In that mode
+    ``max_iterations`` caps the accepted simultaneous updates,
+    ``tolerance`` is the absolute infinity-norm threshold each packed
+    gradient block must meet, ``joint_options.core_residual_tolerance``
+    is the independent relative conditional-core residual target, and
+    ``initial_cores`` (symmetric ``(n, n)`` cores, one per leaf) sets the
+    starting cores -- without it the ERI is projected into each initial
+    leaf and scaled by ``1 / (num_leaves (1 + 2 rho))``, a solver-free
+    heuristic. The inner-solve controls (``inner_solver``, ``cg_*``,
+    ``inner_fallback``, ``inner_solve_history``) belong to the variable
+    projection strategy and must stay at their defaults in joint mode;
+    ``joint_options`` and ``initial_cores`` belong to the joint strategy
+    and are rejected otherwise. The result's ``inner_solve`` fields are
+    ``None`` for a joint fit and its ``joint`` field carries the
+    diagnostics; ``converged`` honors the joint convergence rule. The
+    joint strategy runs on both backends with every tensor on the device.
 
     ``regularization`` (``rho``) enables RC-DF (arXiv:2212.07957, Eq. 17): the
     L2 penalty ``rho * sum_{t,k,l} (Z^t_kl)^2`` is added to the objective and,
@@ -1300,13 +1360,60 @@ def compressed_double_factorization(
         raise ValueError(
             f"inner_fallback must be one of {_INNER_FALLBACKS}, got "
             f"{inner_fallback!r}.")
-    xp, _ = resolve_backend(backend,
-                            problem_size=n,
-                            gpu_min_size=AUTO_GPU_MIN_ORBITALS_COMPRESSED)
+    if not (math.isfinite(float(regularization)) and regularization >= 0.0):
+        raise ValueError("regularization (rho) must be a finite number >= 0.")
+    if optimization_strategy not in OPTIMIZATION_STRATEGIES:
+        raise ValueError(
+            f"optimization_strategy must be one of {OPTIMIZATION_STRATEGIES},"
+            f" got {optimization_strategy!r}.")
+    joint = optimization_strategy == STRATEGY_JOINT_GRADIENT_DESCENT
+    if joint:
+        inner_settings = dict(
+            inner_solver=(inner_solver, "lstsq"),
+            cg_tolerance=(cg_tolerance, 1.0e-10),
+            cg_max_iterations=(cg_max_iterations, None),
+            cg_warm_start=(cg_warm_start, True),
+            cg_optimization_tolerance=(cg_optimization_tolerance, None),
+            cg_preconditioner=(cg_preconditioner, "none"),
+            inner_fallback=(inner_fallback, "none"),
+            inner_solve_history=(inner_solve_history, False))
+        changed = [
+            name for name, (value, default) in inner_settings.items()
+            if value != default
+        ]
+        if changed:
+            raise ValueError(
+                "optimization_strategy='joint_gradient_descent' performs no "
+                "inner core solve, so the inner-solve settings "
+                f"{changed} must stay at their defaults (they apply to "
+                "'variable_projection' only).")
+        if joint_options is None:
+            joint_options = JointGradientDescentOptions()
+        elif not isinstance(joint_options, JointGradientDescentOptions):
+            raise TypeError("joint_options must be a "
+                            "JointGradientDescentOptions instance.")
+        joint_options.validate()
+    else:
+        if joint_options is not None:
+            raise ValueError("joint_options applies to optimization_strategy="
+                             "'joint_gradient_descent' only.")
+        if initial_cores is not None:
+            raise ValueError("initial_cores applies to optimization_strategy="
+                             "'joint_gradient_descent' only.")
+    xp, backend_name = resolve_backend(
+        backend, problem_size=n, gpu_min_size=AUTO_GPU_MIN_ORBITALS_COMPRESSED)
     eri_dev = to_device(np.asarray(eri, dtype=float), xp)
 
+    generators_init = "caller"
     if initial_generators is None:
+        generators_init = "x-df"
         initial_generators = _initial_generators(eri, num_leaves, n, backend)
+
+    if joint:
+        return _compressed_joint(eri_dev, n, num_leaves, regularization, xp,
+                                 backend_name, max_iterations, tolerance,
+                                 joint_options, initial_generators,
+                                 generators_init, initial_cores)
 
     x0 = np.concatenate(
         [_skew_to_vector(np.asarray(g), n) for g in initial_generators])
@@ -1479,19 +1586,71 @@ def compressed_double_factorization(
     objective = 0.5 * xp.sum(fit_residual * fit_residual)
     if regularization > 0.0:
         objective = objective + regularization * xp.sum(cores_dev * cores_dev)
-    return DoubleFactorization(num_orbitals=n,
-                               leaf_rotations=[to_numpy(r) for r in rotations],
-                               leaf_cores=[to_numpy(c) for c in cores],
-                               method="C-DF",
-                               optimizer_success=optimizer_success,
-                               optimizer_nit=optimizer_nit,
-                               optimizer_grad_norm=grad_norm,
-                               optimizer_status=optimizer_status,
-                               optimizer_message=optimizer_message,
-                               objective=float(to_numpy(objective)),
-                               inner_solve=final_diag,
-                               inner_solve_summary=summary,
-                               inner_solve_history=history)
+    return DoubleFactorization(
+        num_orbitals=n,
+        leaf_rotations=[to_numpy(r) for r in rotations],
+        leaf_cores=[to_numpy(c) for c in cores],
+        method="C-DF",
+        optimizer_success=optimizer_success,
+        optimizer_nit=optimizer_nit,
+        optimizer_grad_norm=grad_norm,
+        optimizer_status=optimizer_status,
+        optimizer_message=optimizer_message,
+        objective=float(to_numpy(objective)),
+        inner_solve=final_diag,
+        inner_solve_summary=summary,
+        inner_solve_history=history,
+        optimization_strategy=STRATEGY_VARIABLE_PROJECTION)
+
+
+def _compressed_joint(eri_dev: DeviceArray, n: int, num_leaves: int,
+                      regularization: float, xp: ArrayModule,
+                      backend_name: str, max_iterations: int, tolerance: float,
+                      options: JointGradientDescentOptions, initial_generators,
+                      generators_init: str,
+                      initial_cores) -> DoubleFactorization:
+    """The ``"joint_gradient_descent"`` branch of
+    :func:`compressed_double_factorization`: validate and pack the start,
+    run :func:`~cudaq_algorithms.double_factorization._joint.run_joint_gradient_descent`,
+    and assemble the result."""
+    generators = validate_stack(initial_generators,
+                                num_leaves,
+                                n,
+                                "initial_generators",
+                                antisymmetric=True)
+    x0 = pack_skew(to_device(generators, xp), xp)
+    if initial_cores is None:
+        cores_init = "projection_heuristic"
+        rotations0 = expm_skew_symmetric_batched(to_device(generators, xp), xp)
+        cores0 = default_initial_cores(eri_dev, rotations0, regularization, xp)
+    else:
+        cores_init = "caller"
+        cores0 = to_device(
+            validate_stack(initial_cores,
+                           num_leaves,
+                           n,
+                           "initial_cores",
+                           antisymmetric=False), xp)
+    z0 = pack_symmetric_stack(cores0, xp)
+    rotations, cores, diagnostics = run_joint_gradient_descent(
+        eri_dev, x0, z0, num_leaves, regularization, xp, backend_name,
+        tolerance, max_iterations, options, generators_init, cores_init)
+    from ._joint import JOINT_TERMINATIONS
+    return DoubleFactorization(
+        num_orbitals=n,
+        leaf_rotations=[to_numpy(rotations[t]) for t in range(num_leaves)],
+        leaf_cores=[to_numpy(cores[t]) for t in range(num_leaves)],
+        method="C-DF",
+        optimizer_success=diagnostics.success,
+        optimizer_nit=diagnostics.iterations,
+        optimizer_grad_norm=diagnostics.gradient_norm,
+        optimizer_status=JOINT_TERMINATIONS[diagnostics.termination],
+        optimizer_message=(
+            diagnostics.termination +
+            (f": {diagnostics.message}" if diagnostics.message else "")),
+        objective=diagnostics.objective,
+        optimization_strategy=STRATEGY_JOINT_GRADIENT_DESCENT,
+        joint=diagnostics)
 
 
 def reconstruct_eri(factorization: DoubleFactorization) -> np.ndarray:

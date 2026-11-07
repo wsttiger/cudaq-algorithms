@@ -103,15 +103,22 @@ def to_numpy(array) -> np.ndarray:
     return np.asarray(array)
 
 
-def expm_skew_symmetric_batched(generators: ArrayLike,
-                                xp: ArrayModule) -> DeviceArray:
-    """Batched matrix exponential over a stack of real antisymmetric
-    matrices ``generators`` (shape ``(num_leaves, n, n)``), returning
-    orthogonal matrices. ``i * X`` is Hermitian for real antisymmetric
-    ``X``, so one batched Hermitian eigendecomposition covers the whole
-    stack -- on the CuPy backend a single cuSOLVER call rather than a
-    Python-driven loop, with no dependence on a general
-    matrix-exponential routine.
+def skew_spectral_factors(
+        generators: ArrayLike,
+        xp: ArrayModule) -> tuple[DeviceArray, DeviceArray, DeviceArray]:
+    """Spectral factors of a stack of real antisymmetric matrices
+    ``generators`` (shape ``(num_leaves, n, n)``) and their exponentials.
+
+    ``i X`` is Hermitian for real antisymmetric ``X``, so one batched
+    Hermitian eigendecomposition ``i X = V diag(lambda) V^H`` covers the
+    whole stack -- on the CuPy backend a single cuSOLVER call rather than a
+    Python-driven loop, with no dependence on a general matrix-exponential
+    routine. Returns ``(lambda, V, U)`` with the real eigenvalues ``lambda``
+    of shape ``(num_leaves, n)``, the unitary eigenvectors ``V`` of shape
+    ``(num_leaves, n, n)``, and the real orthogonal rotations
+    ``U = exp(X) = real(V diag(exp(-i lambda)) V^H)``. The factors are what
+    the joint C-DF gradient needs for the Frechet adjoint of ``exp`` at the
+    same ``X``.
 
     Stacked ``eigh`` on current CuPy handles matrix dimensions well
     beyond cuSOLVER's batched-Jacobi 32 limit (verified in review on
@@ -125,4 +132,12 @@ def expm_skew_symmetric_batched(generators: ArrayLike,
     # Scale each leaf's eigenvector columns by its phases, then V diag(phase) V^H.
     scaled = eigenvectors * phases[:, None, :]
     rotated = scaled @ xp.conj(eigenvectors).transpose(0, 2, 1)
-    return xp.real(rotated)
+    return eigenvalues, eigenvectors, xp.real(rotated)
+
+
+def expm_skew_symmetric_batched(generators: ArrayLike,
+                                xp: ArrayModule) -> DeviceArray:
+    """Batched matrix exponential over a stack of real antisymmetric
+    matrices ``generators`` (shape ``(num_leaves, n, n)``), returning
+    orthogonal matrices; the rotations of :func:`skew_spectral_factors`."""
+    return skew_spectral_factors(generators, xp)[2]

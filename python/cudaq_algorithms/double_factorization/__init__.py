@@ -9,17 +9,25 @@ when a GPU is available, with a NumPy/SciPy fallback selected automatically.
 """
 from ._backend import cupy_gpu_available, resolve_backend
 from ._factorization import (
-    CG_ITERATION_CAP_FACTOR, LSTSQ_FALLBACK_MAX_BYTES,
-    LSTSQ_RESIDUAL_TOLERANCE, DoubleFactorization, InnerSolveDiagnostics,
-    InnerSolveSummary, centered_one_body, compressed_double_factorization,
-    double_factorization_one_norm, explicit_double_factorization,
-    factorization_error, lstsq_design_bytes, modified_one_body_integrals,
-    reconstruct_eri)
+    CG_ITERATION_CAP_FACTOR, DENSE_CHOLESKY_MAX_BYTES,
+    DENSE_CHOLESKY_MAX_LEAVES_PER_ORBITAL, DENSE_CHOLESKY_MAX_ORBITALS,
+    LSTSQ_FALLBACK_MAX_BYTES, LSTSQ_RESIDUAL_TOLERANCE, DoubleFactorization,
+    InnerSolveDiagnostics, InnerSolveSummary, centered_one_body,
+    compressed_double_factorization, double_factorization_one_norm,
+    explicit_double_factorization, factorization_error, lstsq_design_bytes,
+    modified_one_body_integrals, reconstruct_eri)
+from ._joint import (JOINT_TERMINATIONS, OPTIMIZATION_STRATEGIES,
+                     JointGradientDescentDiagnostics,
+                     JointGradientDescentOptions)
 
 __all__ = [
     "DoubleFactorization",
     "InnerSolveDiagnostics",
     "InnerSolveSummary",
+    "JointGradientDescentOptions",
+    "JointGradientDescentDiagnostics",
+    "JOINT_TERMINATIONS",
+    "OPTIMIZATION_STRATEGIES",
     "CG_ITERATION_CAP_FACTOR",
     "DENSE_CHOLESKY_MAX_BYTES",
     "DENSE_CHOLESKY_MAX_LEAVES_PER_ORBITAL",
