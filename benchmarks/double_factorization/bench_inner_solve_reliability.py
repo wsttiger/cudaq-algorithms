@@ -112,7 +112,7 @@ def molecule(atom, basis):
     n = mf.mo_coeff.shape[1]
     eri = np.asarray(ao2mo.restore("s1", ao2mo.kernel(mol, mf.mo_coeff), n))
     one_body = mf.mo_coeff.T @ mf.get_hcore() @ mf.mo_coeff
-    return eri, np.linalg.eigvalsh(one_body)
+    return eri, one_body
 
 
 def hydrogen_chain(count, basis, spacing=1.0):
@@ -125,10 +125,10 @@ _WATER = "O 0 0 0; H 0 0 0.957; H 0 0.926 -0.24"
 # name -> (loader, leaf counts). Leaf counts below the X-DF rank are genuinely
 # compressed fits; the synthetic exact-rank case is the only exact one.
 CASES = {
-    "synthetic-exact-n4": (lambda:
-                           (synthetic_eri(4, 3, 11), np.zeros(4)), [3]),
-    "synthetic-compressed-n8": (lambda:
-                                (synthetic_eri(8, 6, 5), np.zeros(8)), [3, 6]),
+    "synthetic-exact-n4": (lambda: (synthetic_eri(4, 3, 11), np.zeros(
+        (4, 4))), [3]),
+    "synthetic-compressed-n8":
+    (lambda: (synthetic_eri(8, 6, 5), np.zeros((8, 8))), [3, 6]),
     "H4-sto3g": (lambda: hydrogen_chain(4, "sto-3g"), [2, 4]),
     "H6-sto3g": (lambda: hydrogen_chain(6, "sto-3g"), [3, 6]),
     "H8-sto3g": (lambda: hydrogen_chain(8, "sto-3g"), [4, 8]),
@@ -147,8 +147,8 @@ import reference_cases  # noqa: E402
 
 REFERENCE_CACHE_DIR = reference_cases.DEFAULT_CACHE_DIR
 for _name, (_loader, _leaf_counts) in reference_cases.REFERENCE_CASES.items():
-    CASES[_name] = ((lambda loader=_loader:
-                     (lambda case: (case.eri, case.one_body_eigenvalues))
+    CASES[_name] = ((lambda loader=_loader: (lambda case:
+                                             (case.eri, case.one_body))
                      (loader(REFERENCE_CACHE_DIR))), _leaf_counts)
 REFERENCE_CASE_NAMES = ",".join(reference_cases.REFERENCE_CASES)
 
@@ -156,11 +156,11 @@ REFERENCE_CASE_NAMES = ",".join(reference_cases.REFERENCE_CASES)
 def load_case(name):
     loader, leaf_counts = CASES[name]
     try:
-        eri, one_body_eigenvalues = loader()
+        eri, one_body = loader()
     except ImportError as error:
         print(f"  {name}: SKIPPED ({error})")
         return None
-    return eri, one_body_eigenvalues, leaf_counts
+    return eri, one_body, leaf_counts
 
 
 # --------------------------------------------------------------------------- #
@@ -334,9 +334,9 @@ FIT_ARMS = {
 DEFAULT_FIT_ARMS = "cg,pcg,cg-fallback,lstsq"
 
 
-def run_fits(case_name, eri, one_body_eigenvalues, leaf_counts, backend_names,
-             rhos, tol, max_iterations, cg_max_iterations, lstsq_limit_bytes,
-             emit, arms, outer_tolerance):
+def run_fits(case_name, eri, one_body, leaf_counts, backend_names, rhos, tol,
+             max_iterations, cg_max_iterations, lstsq_limit_bytes, emit, arms,
+             outer_tolerance):
     n = eri.shape[0]
     norm = float(np.linalg.norm(eri))
     print(f"\n### complete fits: {case_name}  n={n}  max_iterations="
@@ -400,8 +400,11 @@ def run_fits(case_name, eri, one_body_eigenvalues, leaf_counts, backend_names,
                         })
                         continue
                     rel_error = df.factorization_error(eri, fit) / norm
+                    # One-norm with the centered one-body spectrum of *this*
+                    # fit (exchange correction + leaf-centering remainder).
+                    kappa = df.centered_one_body(one_body, fit)
                     lam = df.double_factorization_one_norm(
-                        fit, one_body_eigenvalues, "lcu")
+                        fit, np.linalg.eigvalsh(kappa), "lcu")
                     summary = fit.inner_solve_summary
                     inner = fit.inner_solve
                     loop = (f"{summary.num_solves - summary.num_unconverged}"
@@ -557,7 +560,7 @@ def main():
         loaded = load_case(case_name.strip())
         if loaded is None:
             continue
-        eri, one_body_eigenvalues, leaf_counts = loaded
+        eri, one_body, leaf_counts = loaded
         if args.leaves:
             leaf_counts = [int(x) for x in args.leaves.split(",")]
         if args.inner:
@@ -565,8 +568,8 @@ def main():
                       args.tol, args.repeats, args.cg_max_iterations,
                       limit_bytes, emit)
         if args.fits:
-            run_fits(case_name, eri, one_body_eigenvalues, leaf_counts,
-                     backend_names, rhos, args.tol, args.max_iterations,
+            run_fits(case_name, eri, one_body, leaf_counts, backend_names,
+                     rhos, args.tol, args.max_iterations,
                      args.cg_max_iterations, limit_bytes, emit,
                      [a.strip()
                       for a in args.arms.split(",")], args.outer_tolerance)

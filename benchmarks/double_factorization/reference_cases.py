@@ -3,7 +3,7 @@
 """Molecular reference cases for the double-factorization benchmarks.
 
 Two families, each returned as ``ReferenceCase(eri, one_body, core_energy,
-one_body_eigenvalues, metadata)`` with ``eri`` the chemist-notation
+metadata)`` with ``eri`` the chemist-notation
 ``(pq|rs)`` tensor the ``double_factorization`` module consumes:
 
 * Linear hydrogen chains H_N in STO-6G at 1.4 bohr spacing (and a stretched
@@ -54,9 +54,13 @@ class ReferenceCase:
     def num_orbitals(self) -> int:
         return self.eri.shape[0]
 
-    @property
-    def one_body_eigenvalues(self) -> np.ndarray:
-        return np.linalg.eigvalsh(self.one_body)
+    def centered_one_body_eigenvalues(self, factorization) -> np.ndarray:
+        """Eigenvalues of the centered one-body matrix of ``factorization``
+        (what ``double_factorization_one_norm`` expects); depends on the
+        fit, so it is computed per factorization."""
+        from cudaq_algorithms import double_factorization as df
+        return np.linalg.eigvalsh(
+            df.centered_one_body(self.one_body, factorization))
 
 
 # --------------------------------------------------------------------------- #

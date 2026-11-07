@@ -30,7 +30,7 @@ df = algorithms.double_factorization
 
 def water_mo_integrals():
     """RHF molecular-orbital integrals of H2O/STO-3G: the chemist-notation
-    ERI tensor and the one-body (core Hamiltonian) eigenvalues."""
+    ERI tensor and the one-body (core Hamiltonian) matrix."""
     from pyscf import ao2mo, gto, scf
     mol = gto.M(atom="O 0 0 0; H 0 0 0.957; H 0 0.926 -0.24",
                 basis="sto-3g",
@@ -39,10 +39,10 @@ def water_mo_integrals():
     n = mf.mo_coeff.shape[1]
     eri = np.asarray(ao2mo.restore("s1", ao2mo.kernel(mol, mf.mo_coeff), n))
     one_body = mf.mo_coeff.T @ mf.get_hcore() @ mf.mo_coeff
-    return eri, np.linalg.eigvalsh(one_body)
+    return eri, one_body
 
 
-def report(label, factorization, eri, one_body_eigenvalues):
+def report(label, factorization, eri, one_body, regularization):
     """Print the fit together with the evidence that it converged.
 
     A small one-norm only means something for a converged fit: the outer
@@ -53,8 +53,14 @@ def report(label, factorization, eri, one_body_eigenvalues):
     inner = factorization.inner_solve
     summary = factorization.inner_solve_summary
     rel = df.factorization_error(eri, factorization) / np.linalg.norm(eri)
+    # The LCU one-norm takes the eigenvalues of the *centered* one-body
+    # matrix of this factorization (bare one-body plus the exchange
+    # correction of the factorized tensor and the leaf-centering remainder),
+    # which depends on the fit, so it is recomputed per factorization.
+    kappa = df.centered_one_body(one_body, factorization)
     one_norm = df.double_factorization_one_norm(factorization,
-                                                one_body_eigenvalues, "lcu")
+                                                np.linalg.eigvalsh(kappa),
+                                                "lcu")
     status = "converged" if factorization.converged else "UNCONVERGED"
     print(f"  {label}: {status}")
     print(f"    outer L-BFGS-B : success={factorization.optimizer_success} "
@@ -71,6 +77,12 @@ def report(label, factorization, eri, one_body_eigenvalues):
     print(f"    objective={factorization.objective:.3e}  "
           f"rel reconstruction error={rel:.3e}  one-norm (lcu)={one_norm:.4f}"
           f"{'' if factorization.converged else '  (unconverged fit)'}")
+    if regularization == 0.0:
+        # Without a ridge term the inner system is singular: the cores are
+        # fixed only up to its null space, and the one-norm (unlike the
+        # reconstruction) depends on which representative the solver
+        # returns. Compare one-norms at rho > 0.
+        print("    (rho = 0: one-norm is representation dependent)")
     return rel
 
 
@@ -79,7 +91,7 @@ def main():
     # moves to CuPy (cuSOLVER / cuBLAS) once the orbital count is large
     # enough to amortize the GPU launch overhead.
     backend = "auto"
-    eri, one_body_eigenvalues = water_mo_integrals()
+    eri, one_body = water_mo_integrals()
     norm = np.linalg.norm(eri)
     print("Double factorization of H2O/STO-3G two-electron integrals")
     print(f"  backend: {backend} (GPU usable: {df.cupy_gpu_available()})")
@@ -124,7 +136,7 @@ def main():
         compressed = df.compressed_double_factorization(eri,
                                                         num_leaves=num_leaves,
                                                         **settings)
-        c_rel = report("C-DF  (rho=0)", compressed, eri, one_body_eigenvalues)
+        c_rel = report("C-DF  (rho=0)", compressed, eri, one_body, 0.0)
         assert c_rel <= x_rel + 1.0e-6
         # RC-DF: the ridge term shrinks the cores (lower one-norm) and
         # conditions the inner system, at a small cost in reconstruction.
@@ -132,7 +144,7 @@ def main():
                                                          num_leaves=num_leaves,
                                                          regularization=1.0e-3,
                                                          **settings)
-        report("RC-DF (rho=1e-3)", regularized, eri, one_body_eigenvalues)
+        report("RC-DF (rho=1e-3)", regularized, eri, one_body, 1.0e-3)
 
     # The example asserts what it prints: the final inner solves met their
     # verified thresholds, so the reported residuals are trustworthy.

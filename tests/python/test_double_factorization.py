@@ -1230,12 +1230,10 @@ def test_cdf_diagnostics_on_a_converged_fit(backend, inner_solver):
     inner = fit.inner_solve
     assert inner.solver == inner_solver
     assert inner.converged and inner.residual_norm <= inner.threshold
-    # The direct solver is held to the looser LSTSQ_RESIDUAL_TOLERANCE.
-    expected_tolerance = (1.0e-10 if inner_solver == "cg" else
-                          df.LSTSQ_RESIDUAL_TOLERANCE)
-    assert inner.tolerance == expected_tolerance
-    assert np.isclose(inner.threshold, expected_tolerance * inner.rhs_norm)
-    assert inner.residual_ratio <= expected_tolerance
+    # Both solvers are judged by the requested tolerance.
+    assert inner.tolerance == 1.0e-10
+    assert np.isclose(inner.threshold, 1.0e-10 * inner.rhs_norm)
+    assert inner.residual_ratio <= 1.0e-10
     assert inner.termination == ("direct"
                                  if inner_solver == "lstsq" else "converged")
     summary = fit.inner_solve_summary
@@ -1426,3 +1424,152 @@ def test_femoco_reiher_integrals_are_in_convention_and_solve_reports():
         assert len(cores) == 8 and cores[0].shape == (54, 54)
         if rho > 0.0:
             assert diag.converged, diag
+
+
+# --------------------------------------------------------------------------- #
+# Review follow-ups: requested tolerance through the fallback, positional
+# compatibility, centered one-body for the one-norm
+# --------------------------------------------------------------------------- #
+
+
+def test_direct_solve_is_judged_by_the_requested_tolerance(monkeypatch):
+    # Deterministic: make the backend lstsq return a solution whose verified
+    # residual is ~5e-9 relative. A 1e-10 request must report converged=False
+    # (with the "expected accuracy" note); a 1e-8 request converged=True. The
+    # fallback path inherits the same decision.
+    import cudaq_algorithms.double_factorization._factorization as F
+    eri = _synthetic_eri(n=4, num_vectors=5, seed=9)
+    xp, eri_dev, rotations, op = _inner_setup("numpy", eri, 3, 1.0e-3)
+    exact = np.linalg.lstsq
+    rng = np.random.default_rng(0)
+
+    def perturbed(design, target, rcond=None):
+        solution = exact(design, target, rcond=rcond)[0]
+        noise = rng.standard_normal(solution.shape)
+        noise *= 5.0e-9 * np.linalg.norm(target) / np.linalg.norm(
+            design @ noise)
+        return (solution + noise, )
+
+    monkeypatch.setattr(np.linalg, "lstsq", perturbed)
+    cores, strict = F._solve_inner_cores_lstsq(eri_dev,
+                                               rotations,
+                                               xp,
+                                               1.0e-3,
+                                               tolerance=1.0e-10,
+                                               operator=op)
+    assert strict.tolerance == 1.0e-10
+    assert strict.converged == (strict.residual_ratio <= 1.0e-10)
+    assert strict.converged is False
+    assert "expected accuracy" in strict.message
+    rng = np.random.default_rng(0)
+    _, loose = F._solve_inner_cores_lstsq(eri_dev,
+                                          rotations,
+                                          xp,
+                                          1.0e-3,
+                                          tolerance=1.0e-8,
+                                          operator=op)
+    assert loose.converged and loose.tolerance == 1.0e-8
+    # Through the fallback the requested CG tolerance still decides.
+    rng = np.random.default_rng(0)
+    _, fallback = F._solve_inner_cores(eri_dev,
+                                       rotations,
+                                       xp,
+                                       1.0e-3,
+                                       solver="cg",
+                                       cg_tolerance=1.0e-10,
+                                       cg_max_iterations=1,
+                                       fallback="lstsq")
+    assert fallback.fallback == "lstsq"
+    assert fallback.converged == (fallback.residual_ratio <= 1.0e-10)
+    assert fallback.converged is False
+
+
+def test_fallback_contract_on_a_near_singular_system():
+    # The reviewer's numerical case: nearly identical leaves at rho = 0.
+    # Whatever the direct solve attains, the verdict must follow the
+    # requested tolerance, never a loosened one.
+    import scipy.linalg
+    import cudaq_algorithms.double_factorization._factorization as F
+    rng = np.random.default_rng(32)
+    leaves = rng.standard_normal((5, 4, 4))
+    leaves = 0.5 * (leaves + leaves.transpose(0, 2, 1))
+    eri = np.einsum("xpq,xrs->pqrs", leaves, leaves)
+    generators = rng.standard_normal((3, 4, 4))
+    generators = generators - generators.transpose(0, 2, 1)
+    rotations = [scipy.linalg.expm(3.0e-6 * g) for g in generators]
+    for cap in (1, None):
+        _, diag = F._solve_inner_cores(eri,
+                                       rotations,
+                                       np,
+                                       solver="cg",
+                                       cg_tolerance=1.0e-10,
+                                       cg_max_iterations=cap,
+                                       fallback="lstsq")
+        assert diag.tolerance == 1.0e-10
+        assert diag.converged == (diag.residual_ratio <= 1.0e-10)
+
+
+def test_compressed_double_factorization_keeps_positional_arguments():
+    # The pre-existing positional order ends with initial_generators and
+    # backend; the new options are keyword-only behind them.
+    eri = _synthetic_eri(n=4, num_vectors=3, seed=11)
+    generators = [np.zeros((4, 4)) for _ in range(3)]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        fit = df.compressed_double_factorization(eri, 3, 1, 1.0e-10, 0.0, "cg",
+                                                 1.0e-10, None, True, None,
+                                                 generators, "numpy")
+    assert fit.method == "C-DF" and fit.num_leaves == 3
+    assert fit.inner_solve.solver == "cg"
+    with pytest.raises(TypeError):
+        df.compressed_double_factorization(eri, 3, 1, 1.0e-10, 0.0, "cg",
+                                           1.0e-10, None, True, None,
+                                           generators, "numpy", "pairwise")
+
+
+def test_centered_one_body_one_orbital_analytic():
+    # n = 1, h = 0, (00|00) = 1: one leaf with U = 1, Z = 1. The centered
+    # Hamiltonian is 1/2 (N - 1)^2 = 1/2 N^2 - N + 1/2 = -1/2 N + 1/2 for a
+    # spin-summed number operator N = n_up + n_dn with N^2 = N + 2 n_up n_dn
+    # ... in the encoding's bookkeeping kappa = h + (sum_l Z_kl - Z_kk / 2)
+    # = 1/2, and the LCU norm is |F| + 1/4 |Z| = 0.75, not 0.25.
+    eri = np.ones((1, 1, 1, 1))
+    fit = df.explicit_double_factorization(eri, threshold=0.0)
+    kappa = df.centered_one_body(np.zeros((1, 1)), fit)
+    assert np.allclose(kappa, [[0.5]])
+    assert df.double_factorization_one_norm(fit, np.linalg.eigvalsh(kappa),
+                                            "lcu") == pytest.approx(0.75)
+    assert df.double_factorization_one_norm(fit, np.zeros(1),
+                                            "lcu") == pytest.approx(0.25)
+    with pytest.raises(ValueError):
+        df.centered_one_body(np.zeros((2, 2)), fit)
+
+
+def test_centered_one_body_matches_the_encoding_convention():
+    # Cross-check against the DoubleFactorizedEncoding example: its alpha
+    # minus the identity weight equals the LCU one-norm evaluated with the
+    # centered one-body spectrum of the same factorization.
+    import pathlib
+    import sys
+    examples = (pathlib.Path(__file__).resolve().parents[2] / "docs" /
+                "sphinx" / "examples" / "python")
+    if not (examples / "df_encoding.py").exists():
+        pytest.skip("df_encoding example not available")
+    sys.path.insert(0, str(examples))
+    try:
+        from df_encoding import DoubleFactorizedEncoding
+    except Exception as error:  # pragma: no cover - CUDA-Q kernel env
+        pytest.skip(f"df_encoding import failed: {error}")
+    rng = np.random.default_rng(3)
+    n = 3
+    one_body = rng.normal(size=(n, n))
+    one_body = 0.5 * (one_body + one_body.T)
+    eri = _synthetic_eri(n, 2 * n, seed=3)
+    encoding = DoubleFactorizedEncoding(one_body, eri)
+    factorization = encoding.factorization
+    kappa = df.centered_one_body(one_body, factorization)
+    lam = df.double_factorization_one_norm(factorization,
+                                           np.linalg.eigvalsh(kappa), "lcu")
+    identity_weight = sum(
+        abs(c) for c, qubits, _ in encoding.terms if not qubits)
+    assert encoding.alpha - identity_weight == pytest.approx(lam, rel=1e-12)

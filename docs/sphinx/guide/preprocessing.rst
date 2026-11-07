@@ -361,10 +361,14 @@ residual is substituted and iteration continues. A zero right-hand side
 returns zero cores immediately. An exhausted iteration cap, a search
 direction with non-positive curvature, a non-finite quantity, or
 stagnation ends the solve with the cores found so far — reported, not
-raised. The direct ``"lstsq"`` solver is held to the looser of
-`cg_tolerance` and ``LSTSQ_RESIDUAL_TOLERANCE`` (``1e-8``): it minimizes
-the least-squares fit exactly, and on singular ``rho = 0`` systems its
-normal-equation residual lands near ``1e-9`` relative.
+raised. The direct ``"lstsq"`` solver is judged by the same requested
+tolerance. It minimizes the least-squares fit exactly, but on singular
+``rho = 0`` systems its normal-equation residual lands near ``1e-9``
+relative (``LSTSQ_RESIDUAL_TOLERANCE`` records the expected ``1e-8``), so
+a ``1e-10`` request can come back ``converged=False`` with a message
+saying the direct solve is at its expected accuracy; the requested
+tolerance is never loosened, including when ``lstsq`` serves as the
+fallback for an unconverged CG solve.
 
 At ``rho = 0`` the inner system is singular (the all-ones core direction
 ``(J, -J)`` of any two leaves is a null vector of the design, and
@@ -454,7 +458,13 @@ Full signatures and parameter documentation live in the
 
 :func:`~cudaq_algorithms.double_factorization.double_factorization_one_norm`
     One-norm :math:`\lambda` of the DF Hamiltonian; ``convention="lcu"``
-    (Pauli-rotation) or ``"burg"`` (qubitization).
+    (Pauli-rotation) or ``"burg"`` (qubitization). Takes the eigenvalues of
+    the *centered* one-body matrix of the factorization.
+
+:func:`~cudaq_algorithms.double_factorization.centered_one_body`
+    That matrix :math:`\kappa`: the bare one-body integrals plus the
+    exchange correction of the factorized tensor and the leaf-centering
+    remainder. It depends on the fit, so compute it per factorization.
 
 Feeding a compressed tensor to the transform
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

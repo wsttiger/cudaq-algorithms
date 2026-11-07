@@ -757,8 +757,11 @@ def _solve_inner_cores_lstsq(
     alternative that scales to large orbital counts.
 
     Returns ``(cores, diagnostics)``; the diagnostics carry the verified
-    normal-equation residual of the solution against ``max(tolerance,
-    LSTSQ_RESIDUAL_TOLERANCE) * ||R||_F`` (``termination="direct"``).
+    normal-equation residual of the solution against the requested
+    ``tolerance * ||R||_F`` (``termination="direct"``). When that target is
+    missed but the residual is within ``LSTSQ_RESIDUAL_TOLERANCE``, the
+    message says the direct solve is at its expected accuracy; the
+    requested tolerance is never loosened.
     """
     n = eri_dev.shape[0]
     target = eri_dev.reshape(-1)
@@ -798,10 +801,17 @@ def _solve_inner_cores_lstsq(
 
     op = operator if operator is not None else _InnerOperator(
         eri_dev, rotations_dev, xp, regularization)
-    tolerance = max(float(tolerance), LSTSQ_RESIDUAL_TOLERANCE)
+    tolerance = float(tolerance)
     threshold = tolerance * op.rhs_norm
     residual_norm = op.residual_norm(xp.stack(cores))
     converged = op.rhs_norm == 0.0 or residual_norm <= threshold
+    message = ""
+    if (not converged
+            and residual_norm <= LSTSQ_RESIDUAL_TOLERANCE * op.rhs_norm):
+        message = (f"direct solve at its expected accuracy (relative "
+                   f"residual {residual_norm / op.rhs_norm:.2e} <= "
+                   f"{LSTSQ_RESIDUAL_TOLERANCE:g}) but above the requested "
+                   f"tolerance {tolerance:g}")
     return cores, InnerSolveDiagnostics(solver="lstsq",
                                         preconditioner="none",
                                         converged=converged,
@@ -810,15 +820,17 @@ def _solve_inner_cores_lstsq(
                                         residual_norm=residual_norm,
                                         threshold=threshold,
                                         rhs_norm=op.rhs_norm,
-                                        tolerance=tolerance)
+                                        tolerance=tolerance,
+                                        message=message)
 
 
-# The direct solver is held to the looser of the requested tolerance and
-# this relative normal-equation residual: ``lstsq`` minimizes ``||J z -
-# eri||`` with a truncated SVD of the design ``J``, and on the singular
-# ``rho = 0`` molecular systems its normal-equation residual
+# Relative normal-equation residual a direct ``lstsq`` solve can be expected
+# to reach: it minimizes ``||J z - eri||`` with a truncated SVD of the design
+# ``J``, and on the singular ``rho = 0`` molecular systems its residual
 # ``||R - A z||_F / ||R||_F`` lands around 1e-9 (measured on H6/H2O in
 # STO-3G) even though the least-squares fit itself is exact to round-off.
+# This is reporting context only: the convergence decision always uses the
+# requested tolerance.
 LSTSQ_RESIDUAL_TOLERANCE = 1.0e-8
 
 
@@ -894,7 +906,8 @@ def _solve_inner_cores(
     direct.fallback = "lstsq"
     direct.message = (f"cg terminated with {diag.termination} at residual "
                       f"{diag.residual_norm:.3e} (threshold "
-                      f"{diag.threshold:.3e}); cores from lstsq")
+                      f"{diag.threshold:.3e}); cores from lstsq" +
+                      (f"; {direct.message}" if direct.message else ""))
     return cores, direct
 
 
@@ -981,11 +994,12 @@ def compressed_double_factorization(
         cg_max_iterations: Optional[int] = None,
         cg_warm_start: bool = True,
         cg_optimization_tolerance: Optional[float] = None,
+        initial_generators: Optional[List[np.ndarray]] = None,
+        backend: str = "auto",
+        *,
         cg_preconditioner: str = "none",
         inner_fallback: str = "none",
-        inner_solve_history: bool = False,
-        initial_generators: Optional[List[np.ndarray]] = None,
-        backend: str = "auto") -> DoubleFactorization:
+        inner_solve_history: bool = False) -> DoubleFactorization:
     """Compressed double factorization (C-DF) by least-squares optimization.
 
     Minimizes ``O = 1/2 || eri - sum_t U^t Z^t (U^t)^T (congruence) ||_F^2`` over
@@ -1279,6 +1293,38 @@ def modified_one_body_integrals(one_body: ArrayLike,
     return one_body - 0.5 * np.einsum("prqr->pq", eri, optimize=True)
 
 
+def centered_one_body(one_body: ArrayLike,
+                      factorization: DoubleFactorization) -> np.ndarray:
+    """One-body matrix ``kappa`` of the centered double-factorized
+    Hamiltonian of ``factorization``.
+
+    The DF Hamiltonian is written (von Burg et al., arXiv:2007.14460) as
+    ``const + sum_k F_k N_k + 1/2 sum_t sum_kl Z^t_kl (N^t_k - 1)(N^t_l - 1)``
+    with ``F`` the eigenvalues of ``kappa = h + sum_t U^t diag(sum_l Z^t_kl
+    - 1/2 Z^t_kk) (U^t)^T``: the raw one-body integrals ``h`` plus the
+    exchange correction ``-1/2 sum_r (pr|rq)`` *of the factorized tensor*
+    and the one-body remainder from centering the leaf number operators.
+    The eigenvalues of this matrix are the ``one_body_eigenvalues`` that
+    :func:`double_factorization_one_norm` expects; the bare eigenvalues of
+    ``h`` give a different (and for ``"lcu"`` smaller) number. A
+    non-symmetric user-built core is symmetrized as the encoding does.
+    """
+    kappa = np.array(one_body, dtype=float, copy=True)
+    if kappa.ndim != 2 or kappa.shape[0] != kappa.shape[1]:
+        raise ValueError("one_body must be a square (n, n) matrix.")
+    if kappa.shape[0] != factorization.num_orbitals:
+        raise ValueError("one_body and factorization have different orbital "
+                         "counts.")
+    for rotation, core in zip(factorization.leaf_rotations,
+                              factorization.leaf_cores):
+        rotation = np.asarray(rotation, dtype=float)
+        core = np.asarray(core, dtype=float)
+        absorbed = (0.5 * (core.sum(axis=1) + core.sum(axis=0)) -
+                    0.5 * np.diag(core))
+        kappa += (rotation * absorbed) @ rotation.T
+    return kappa
+
+
 def double_factorization_one_norm(factorization: DoubleFactorization,
                                   one_body_eigenvalues: ArrayLike,
                                   convention: str = "lcu") -> float:
@@ -1298,7 +1344,9 @@ def double_factorization_one_norm(factorization: DoubleFactorization,
     reduces to RC-DF Eq. 15 / von Burg's ``(1/4)(sum_k |gamma_k|)^2``
     for rank-one cores.)
 
-    ``one_body_eigenvalues`` are the diagonal one-body (Fock-like) eigenvalues.
+    ``one_body_eigenvalues`` are the eigenvalues of the centered one-body
+    matrix ``kappa`` of this factorization -- see :func:`centered_one_body`
+    -- not of the bare one-body integrals.
     """
     one_body_eigenvalues = np.asarray(one_body_eigenvalues, dtype=float)
     lam = float(np.sum(np.abs(one_body_eigenvalues)))
