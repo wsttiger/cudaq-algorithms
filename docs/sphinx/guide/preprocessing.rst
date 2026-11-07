@@ -270,13 +270,17 @@ X-DF vs C-DF
 - **C-DF** lifts the rank-one restriction on ``Z^t`` and minimizes
   ``O = 1/2 || eri - reconstruction ||_F^2`` over a fixed number of leaves.
   The leaf rotations are parameterized as ``U^t = exp(X^t)`` (antisymmetric
-  ``X^t``) and optimized with L-BFGS, while the symmetric cores are solved
-  in closed form at each step (the two-step scheme of the paper,
-  warm-started from X-DF). C-DF reaches a target accuracy with substantially
-  fewer leaves than X-DF. The L-BFGS status is stored on the result
-  (``optimizer_success``, ``optimizer_nit``, ``optimizer_grad_norm``); a
-  ``RuntimeWarning`` is issued if the run hits ``max_iterations`` or otherwise
-  fails to converge, and the best factorization found is still returned.
+  ``X^t``). The default strategy, **variable projection**
+  (``optimization_strategy="variable_projection"``), optimizes the
+  rotations with L-BFGS while the symmetric cores are solved in closed form
+  at each step (the two-step scheme of the paper, warm-started from X-DF);
+  the opt-in **joint gradient descent** strategy updates rotations and
+  cores together and is described below. C-DF reaches a target accuracy
+  with substantially fewer leaves than X-DF. The optimizer status is stored
+  on the result (``optimizer_success``, ``optimizer_nit``,
+  ``optimizer_grad_norm``, ``optimization_strategy``); a ``RuntimeWarning``
+  is issued if the run hits ``max_iterations`` or otherwise fails to
+  converge, and the best factorization found is still returned.
 
 RC-DF regularization
 ~~~~~~~~~~~~~~~~~~~~~
@@ -298,6 +302,11 @@ per-iteration cost as plain C-DF.
 
 Inner core solve: explicit vs matrix-free
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The inner-solve controls of this section and the next (`inner_solver`,
+`cg_*`, `inner_fallback`, `inner_solve_history`) belong to the default
+variable-projection strategy; the joint strategy performs no inner solve
+and rejects them when set.
 
 At each L-BFGS step the symmetric cores ``Z^t`` are recovered exactly by a
 linear solve for fixed rotations. Two solvers are available via
@@ -434,6 +443,96 @@ When the explicit design matrix is small enough
 solver and records ``fallback="lstsq"``; above that bound the CG result is
 kept and the diagnostics say the fallback was skipped.
 
+Joint gradient descent (opt-in)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``optimization_strategy="joint_gradient_descent"`` treats the generators
+``X^t`` and the cores ``Z^t`` as one set of variables and lowers the same
+objective ``F(X, Z) = 1/2 ||eri - reconstruction||_F^2 + rho ||Z||_F^2``
+by full-batch gradient descent with Armijo backtracking. No inner core
+solve runs at any point -- not per step, not at the end -- so each
+iteration costs a fixed number of tensor contractions instead of an
+iterative linear solve, and the same code runs on NumPy and on CuPy with
+every tensor (integrals, parameters, rotations, residual, gradients, trial
+buffers) resident on the device; only scalar decisions are read back.
+
+.. code-block:: python
+
+   fit = df.compressed_double_factorization(
+       eri, num_leaves, regularization=rho,
+       optimization_strategy="joint_gradient_descent",
+       joint_options=df.JointGradientDescentOptions(core_residual_tolerance=1e-10),
+       max_iterations=2000, tolerance=1e-8, backend="cupy")   # or "numpy"
+   fit.joint.termination, fit.joint.generator_gradient_inf, fit.joint.core_residual_ratio
+
+Parameters live in Frobenius-preserving packed coordinates (strict lower
+triangle of ``X^t`` with weight ``sqrt(2)``; upper triangle of ``Z^t``
+with diagonal weight 1 and off-diagonal weight ``sqrt(2)``). The partial
+gradients are exact: ``dF/dZ^t = -P_t(Delta) + 2 rho Z^t`` with ``P_t``
+the projection of the fit residual ``Delta`` into leaf ``t`` (identical
+to ``((A + 2 rho I) Z - R)^t`` of the normal equations), and ``dF/dX^t``
+is the rotation gradient ``-4 sum Delta U Z U U`` pulled back through the
+Frechet adjoint of ``exp``, evaluated from the batched Hermitian
+eigendecomposition of ``i X^t`` by divided differences (a ``sinc`` kernel,
+so repeated eigenvalues need no special case). Both blocks move in the
+same step: ``d = (-s_x g_x, -s_z g_z)`` with the block scales of
+:class:`~cudaq_algorithms.double_factorization.JointGradientDescentOptions`,
+and a trial step ``alpha`` is accepted when
+``F(trial) <= F + c1 alpha (g . d)`` (``c1 = 1e-4``, halving at most 20
+times from ``initial_step``; the ``"adaptive"`` policy reuses the last
+accepted step and doubles it after a first-trial acceptance). Trials are
+independent evaluations and gradients are computed only at accepted
+states.
+
+The meaning of the shared parameters changes with the strategy:
+`max_iterations` caps the accepted simultaneous updates and `tolerance` is
+the absolute infinity-norm threshold each packed gradient block must meet.
+A joint fit counts as converged only when, at the returned state, the
+objective, gradients, and parameters are finite, both gradient blocks are
+within `tolerance`, **and** the conditional-core residual
+``||R - (A + 2 rho I) Z||_F / ||R||_F`` -- recomputed with the normal
+operator, independently of the gradient evaluator -- is within
+``joint_options.core_residual_tolerance`` (default ``1e-10``; for a zero
+right-hand side the absolute ``core_residual_absolute_tolerance``
+applies). The core residual is rechecked while the gradient blocks are
+within tolerance, and the descent continues until it is met or the budget
+ends. Anything else is a termination reason, never success:
+``"max_iterations"``, ``"line_search_failed"``, ``"numerical_failure"``,
+``"stationary_core_residual_unmet"`` (gradient blocks within tolerance
+but the core criterion unmet when the budget ran out), and
+``"objective_stagnation"`` (only with a positive ``objective_tolerance``).
+The best finite accepted state is returned and its objective, both
+gradients, and core residual are recomputed afresh for the diagnostics.
+Note that the attainable gradient tolerance is bounded by the float64
+Armijo floor ``~sqrt(eps F)`` of a nonzero optimum.
+
+Starting point: ``initial_generators`` (antisymmetric) and
+``initial_cores`` (symmetric, indefinite allowed) are accepted as given,
+after a round-off-sized asymmetry is cleaned and a material one rejected.
+Without ``initial_cores`` the ERI is projected into each initial leaf and
+scaled, ``Z^t = R^t / (num_leaves (1 + 2 rho))`` -- a solver-free
+heuristic recorded as ``cores_init="projection_heuristic"``. No core
+solve is performed to initialize, polish, or finish the fit; a caller who
+wants least-squares cores at the start computes them explicitly and
+passes ``initial_cores``. For ``n == 1`` there are no generator
+coordinates and only the cores are optimized; at ``rho = 0`` the cores
+are not projected or regularized and ``core_norm`` reports their size.
+
+The result keeps the inner-solve fields ``None`` and fills
+:class:`~cudaq_algorithms.double_factorization.JointGradientDescentDiagnostics`
+under ``fit.joint``: actual backend, termination and message, accepted
+updates, objective and gradient evaluations, backtracks, final step and
+block scales, both block gradient infinity norms and the Euclidean norm of
+the full packed gradient (also ``optimizer_grad_norm``), the core residual
+with its threshold, core norm, initialization provenance, elapsed time,
+host scalar reads, the effective options, and a bounded per-iteration
+history (``history_length``). ``optimizer_success`` and ``converged``
+follow the complete joint rule; one ``RuntimeWarning`` reports an
+unsuccessful termination. Plain gradient descent converges slowly on the
+ill-conditioned molecular fits -- several thousand updates on small
+exact-rank tensors -- so a tight tolerance may not be reached within the
+budget; that outcome is reported, not hidden.
+
 API
 ~~~
 
@@ -442,7 +541,7 @@ All functions return or operate on a
 dataclass with `num_orbitals`, `leaf_rotations` (:math:`U^t`),
 `leaf_cores` (:math:`Z^t`), `num_leaves`, a `reconstruct_eri` method, and
 the C-DF diagnostics above (`optimizer_*`, `objective`, `inner_solve`,
-`inner_solve_summary`, `converged`).
+`inner_solve_summary`, `optimization_strategy`, `joint`, `converged`).
 Full signatures and parameter documentation live in the
 :doc:`Python API reference <../api/python_api>`.
 
@@ -456,7 +555,17 @@ Full signatures and parameter documentation live in the
     ``regularization=rho>0`` enables **RC-DF** (see above);
     ``inner_solver="cg"`` selects the matrix-free inner core solve,
     ``cg_preconditioner="pairwise"`` its preconditioner, and
-    ``inner_fallback="lstsq"`` the direct fallback.
+    ``inner_fallback="lstsq"`` the direct fallback;
+    ``optimization_strategy="joint_gradient_descent"`` selects the joint
+    strategy with its :class:`~cudaq_algorithms.double_factorization.JointGradientDescentOptions`.
+
+:class:`~cudaq_algorithms.double_factorization.JointGradientDescentOptions`
+    Step scales, Armijo settings, core-residual target, and history
+    length of the joint strategy.
+
+:class:`~cudaq_algorithms.double_factorization.JointGradientDescentDiagnostics`
+    Outcome of a joint fit (``fit.joint``): termination, counters, block
+    gradient norms, verified conditional-core residual.
 
 :class:`~cudaq_algorithms.double_factorization.InnerSolveDiagnostics`
     Verified outcome of the final inner core solve carried by a C-DF

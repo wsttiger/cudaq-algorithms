@@ -22,6 +22,19 @@ factorizes the ERI tensor both the exact and the least-squares-optimized way.
    :language: python
    :start-after: [Begin Documentation]
 
+Joint gradient descent for compressed double factorization
+----------------------------------------------------------
+
+The opt-in ``"joint_gradient_descent"`` C-DF strategy on the NumPy and CuPy
+backends: the complete convergence rule read off ``fit.joint`` on an
+exact-rank synthetic tensor, a shared start evaluated on both backends, and
+a budget-limited compressed fit whose unmet tolerance is reported as a
+termination reason rather than as success.
+
+.. literalinclude:: ../examples/python/df_joint_gradient_descent.py
+   :language: python
+   :start-after: [Begin Documentation]
+
 From double-factorized integrals to LCU/QSVT cost
 -------------------------------------------------
 
