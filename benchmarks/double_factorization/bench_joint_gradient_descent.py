@@ -28,6 +28,11 @@ Arms:
   L-BFGS-B steps, ftol = gtol = 1e-8), the dense benchmark's "cg" arm.
 - ``dense_numpy`` (optional): variable projection with the dense Cholesky
   preconditioner.
+- ``joint_numpy_long`` / ``joint_cupy_long`` (supplementary): the joint
+  arms with a 40000-update budget, roughly the wall time of the CPU
+  variable-projection arms at these sizes.
+- ``joint_numpy_heuristic`` / ``joint_cupy_heuristic`` (supplementary):
+  the joint arms started from the library's solver-free default cores.
 
 Timing: BLAS/OpenMP threads are pinned to 1 before NumPy is imported; the
 requested backend is forced (a CuPy arm that cannot run is recorded as an
@@ -107,13 +112,14 @@ SEEDS_PILOT = (1, )
 SEEDS_GRID = (0, 1, 2, 3, 4)
 
 JOINT_MAX_ITERATIONS = 2000
+JOINT_LONG_MAX_ITERATIONS = 40000
 JOINT_TOLERANCE = 1.0e-8
 JOINT_CORE_RESIDUAL_TOLERANCE = 1.0e-10
 Z0_TOLERANCE = 1.0e-12
 
 # Frozen after the pilot tuning (``--mode tune``): block step scales and
 # initial step of the joint arms. ``TUNING_CANDIDATES`` is the declared set.
-TUNED = dict(generator_step_scale=1.0, core_step_scale=1.0, initial_step=1.0)
+TUNED = dict(generator_step_scale=4.0, core_step_scale=1.0, initial_step=1.0)
 TUNING_CANDIDATES = (
     dict(generator_step_scale=1.0, core_step_scale=1.0, initial_step=1.0),
     dict(generator_step_scale=1.0, core_step_scale=4.0, initial_step=1.0),
@@ -137,6 +143,17 @@ ARMS = {
     dict(kind="joint", backend="numpy", heuristic=True),
     "joint_cupy_heuristic":
     dict(kind="joint", backend="cupy", heuristic=True),
+    # Supplementary equal-wall-time arms: the joint loop with twenty times
+    # the primary update budget, which at n <= 10 brings its CPU time into
+    # the range of the variable-projection arms.
+    "joint_numpy_long":
+    dict(kind="joint",
+         backend="numpy",
+         max_iterations=JOINT_LONG_MAX_ITERATIONS),
+    "joint_cupy_long":
+    dict(kind="joint",
+         backend="cupy",
+         max_iterations=JOINT_LONG_MAX_ITERATIONS),
 }
 PRIMARY_ARMS = ("joint_numpy", "joint_cupy", "vp_numpy", "vp_cupy")
 
@@ -798,10 +815,10 @@ def main():
                         continue
                     try:
                         if spec["kind"] == "joint":
-                            record = run_joint(
-                                case, rho, arm, tuned or TUNED,
-                                TUNING_ITERATIONS
-                                if tuned else args.max_iterations, z0)
+                            budget = (TUNING_ITERATIONS if tuned else spec.get(
+                                "max_iterations", args.max_iterations))
+                            record = run_joint(case, rho, arm, tuned or TUNED,
+                                               budget, z0)
                         else:
                             record = run_vp(case, rho, arm)
                         record["tuned"] = tuned
