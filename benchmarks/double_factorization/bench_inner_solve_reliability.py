@@ -312,17 +312,36 @@ def run_inner(case_name, eri, leaf_counts, backend_names, rhos, tol, repeats,
 # Complete fits
 # --------------------------------------------------------------------------- #
 
-FIT_CONFIGS = [("cg", "none", "none"), ("cg", "pairwise", "none"),
-               ("cg", "none", "lstsq"), ("lstsq", "none", "none")]
+# Named fit arms: compressed_double_factorization keyword overrides on top
+# of the common settings. "legacy" reproduces the pre-diagnostics behavior a
+# user would have seen (cold-start CG, tight in-loop tolerance, iteration cap
+# at the system dimension T n^2); the others are the shipped options.
+FIT_ARMS = {
+    "legacy":
+    dict(inner_solver="cg",
+         cg_warm_start=False,
+         cg_optimization_tolerance=1.0e-10,
+         cg_max_iterations="dimension"),
+    "cg":
+    dict(inner_solver="cg"),
+    "pcg":
+    dict(inner_solver="cg", cg_preconditioner="pairwise"),
+    "cg-fallback":
+    dict(inner_solver="cg", inner_fallback="lstsq"),
+    "lstsq":
+    dict(inner_solver="lstsq"),
+}
+DEFAULT_FIT_ARMS = "cg,pcg,cg-fallback,lstsq"
 
 
 def run_fits(case_name, eri, one_body_eigenvalues, leaf_counts, backend_names,
              rhos, tol, max_iterations, cg_max_iterations, lstsq_limit_bytes,
-             emit):
+             emit, arms, outer_tolerance):
     n = eri.shape[0]
     norm = float(np.linalg.norm(eri))
     print(f"\n### complete fits: {case_name}  n={n}  max_iterations="
-          f"{max_iterations}  cg_tolerance={tol:g}")
+          f"{max_iterations}  tolerance={outer_tolerance:g}  "
+          f"cg_tolerance={tol:g}  arms={','.join(arms)}")
     print(f"  {'backend':7} {'T':>3} {'rho':>7} {'solver':6} {'precond':8} "
           f"{'fallbk':6} | {'outer':5} {'nit':>5} {'final':5} {'in-loop':>14} "
           f"| {'objective':>11} {'rel err':>9} {'lambda':>8} {'time s':>8}")
@@ -331,18 +350,23 @@ def run_fits(case_name, eri, one_body_eigenvalues, leaf_counts, backend_names,
         for backend in backend_names:
             xp, _ = resolve_backend(backend)
             for rho in rhos:
-                for solver, preconditioner, fallback in FIT_CONFIGS:
+                for arm in arms:
+                    overrides = dict(FIT_ARMS[arm])
+                    solver = overrides["inner_solver"]
+                    preconditioner = overrides.get("cg_preconditioner", "none")
+                    fallback = overrides.get("inner_fallback", "none")
                     if solver == "lstsq" and design_bytes > lstsq_limit_bytes:
                         continue
+                    if overrides.get("cg_max_iterations") == "dimension":
+                        overrides["cg_max_iterations"] = num_leaves * n * n
                     kwargs = dict(num_leaves=num_leaves,
                                   max_iterations=max_iterations,
+                                  tolerance=outer_tolerance,
                                   regularization=rho,
-                                  inner_solver=solver,
                                   cg_tolerance=tol,
                                   cg_max_iterations=cg_max_iterations,
-                                  cg_preconditioner=preconditioner,
-                                  inner_fallback=fallback,
                                   backend=backend)
+                    kwargs.update(overrides)
                     try:
                         with warnings.catch_warnings():
                             warnings.simplefilter("ignore", RuntimeWarning)
@@ -371,6 +395,7 @@ def run_fits(case_name, eri, one_body_eigenvalues, leaf_counts, backend_names,
                             "solver": solver,
                             "preconditioner": preconditioner,
                             "fallback": fallback,
+                            "arm": arm,
                             "error": f"{type(error).__name__}: {error}",
                         })
                         continue
@@ -388,37 +413,81 @@ def run_fits(case_name, eri, one_body_eigenvalues, leaf_counts, backend_names,
                           f"{loop:>14} | {fit.objective:>11.4e} "
                           f"{rel_error:>9.2e} {lam:>8.3f} {elapsed:>8.2f}")
                     emit({
-                        "experiment": "fit",
-                        "case": case_name,
-                        "n": n,
-                        "num_leaves": num_leaves,
-                        "backend": backend,
-                        "rho": rho,
-                        "solver": solver,
-                        "preconditioner": preconditioner,
-                        "fallback": fallback,
-                        "max_iterations": max_iterations,
-                        "cg_tolerance": tol,
-                        "optimizer_success": fit.optimizer_success,
-                        "optimizer_nit": fit.optimizer_nit,
-                        "optimizer_status": fit.optimizer_status,
-                        "optimizer_grad_norm": fit.optimizer_grad_norm,
-                        "final_converged": inner.converged,
-                        "final_termination": inner.termination,
-                        "final_iterations": inner.iterations,
-                        "final_residual_norm": inner.residual_norm,
-                        "final_threshold": inner.threshold,
-                        "final_fallback": inner.fallback,
-                        "loop_solves": summary.num_solves,
-                        "loop_unconverged": summary.num_unconverged,
-                        "loop_total_iterations": summary.total_iterations,
+                        "experiment":
+                        "fit",
+                        "case":
+                        case_name,
+                        "n":
+                        n,
+                        "num_leaves":
+                        num_leaves,
+                        "backend":
+                        backend,
+                        "rho":
+                        rho,
+                        "solver":
+                        solver,
+                        "preconditioner":
+                        preconditioner,
+                        "fallback":
+                        fallback,
+                        "max_iterations":
+                        max_iterations,
+                        "cg_tolerance":
+                        tol,
+                        "optimizer_success":
+                        fit.optimizer_success,
+                        "optimizer_nit":
+                        fit.optimizer_nit,
+                        "optimizer_status":
+                        fit.optimizer_status,
+                        "optimizer_grad_norm":
+                        fit.optimizer_grad_norm,
+                        "final_converged":
+                        inner.converged,
+                        "final_termination":
+                        inner.termination,
+                        "final_iterations":
+                        inner.iterations,
+                        "final_residual_norm":
+                        inner.residual_norm,
+                        "final_threshold":
+                        inner.threshold,
+                        "final_fallback":
+                        inner.fallback,
+                        "loop_solves":
+                        summary.num_solves,
+                        "loop_unconverged":
+                        summary.num_unconverged,
+                        "loop_terminations":
+                        dict(summary.terminations),
+                        "arm":
+                        arm,
+                        "cg_max_iterations_used":
+                        kwargs["cg_max_iterations"],
+                        "outer_tolerance":
+                        outer_tolerance,
+                        "cg_warm_start":
+                        kwargs.get("cg_warm_start", True),
+                        "strict_pass":
+                        bool(fit.optimizer_success and inner.converged
+                             and summary.num_unconverged == 0
+                             and "max_iterations" not in summary.terminations
+                             and inner.termination != "max_iterations"),
+                        "loop_total_iterations":
+                        summary.total_iterations,
                         "loop_worst_residual_to_threshold":
                         summary.worst_residual_to_threshold,
-                        "objective": fit.objective,
-                        "relative_error": rel_error,
-                        "one_norm_lcu": lam,
-                        "converged": fit.converged,
-                        "time_s": elapsed,
+                        "objective":
+                        fit.objective,
+                        "relative_error":
+                        rel_error,
+                        "one_norm_lcu":
+                        lam,
+                        "converged":
+                        fit.converged,
+                        "time_s":
+                        elapsed,
                     })
 
 
@@ -446,6 +515,17 @@ def main():
     parser.add_argument("--tol", type=float, default=1.0e-10)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--max-iterations", type=int, default=2000)
+    parser.add_argument("--outer-tolerance",
+                        type=float,
+                        default=1.0e-10,
+                        help="L-BFGS-B ftol/gtol passed as `tolerance`")
+    parser.add_argument("--arms",
+                        default=DEFAULT_FIT_ARMS,
+                        help=f"comma list of fit arms from {list(FIT_ARMS)}")
+    parser.add_argument("--leaves",
+                        default=None,
+                        help="comma list of leaf counts overriding every "
+                        "case's defaults")
     parser.add_argument("--cg-max-iterations",
                         type=int,
                         default=None,
@@ -478,6 +558,8 @@ def main():
         if loaded is None:
             continue
         eri, one_body_eigenvalues, leaf_counts = loaded
+        if args.leaves:
+            leaf_counts = [int(x) for x in args.leaves.split(",")]
         if args.inner:
             run_inner(case_name, eri, leaf_counts, backend_names, rhos,
                       args.tol, args.repeats, args.cg_max_iterations,
@@ -485,7 +567,9 @@ def main():
         if args.fits:
             run_fits(case_name, eri, one_body_eigenvalues, leaf_counts,
                      backend_names, rhos, args.tol, args.max_iterations,
-                     args.cg_max_iterations, limit_bytes, emit)
+                     args.cg_max_iterations, limit_bytes, emit,
+                     [a.strip()
+                      for a in args.arms.split(",")], args.outer_tolerance)
     if sink is not None:
         sink.close()
 
