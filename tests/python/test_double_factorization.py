@@ -1573,3 +1573,271 @@ def test_centered_one_body_matches_the_encoding_convention():
     identity_weight = sum(
         abs(c) for c, qubits, _ in encoding.terms if not qubits)
     assert encoding.alpha - identity_weight == pytest.approx(lam, rel=1e-12)
+
+
+# --------------------------------------------------------------------------- #
+# Dense Cholesky preconditioner (NumPy, small systems)
+# --------------------------------------------------------------------------- #
+
+
+def test_packed_symmetric_coordinates_round_trip_and_preserve_frobenius():
+    import cudaq_algorithms.double_factorization._factorization as F
+    rng = np.random.default_rng(5)
+    cores = rng.standard_normal((3, 4, 4))
+    cores = 0.5 * (cores + cores.transpose(0, 2, 1))
+    other = rng.standard_normal((3, 4, 4))
+    other = 0.5 * (other + other.transpose(0, 2, 1))
+    packed = F.pack_symmetric(cores)
+    assert packed.shape == (3 * 10, )
+    assert np.allclose(F.unpack_symmetric(packed, 3, 4), cores, atol=1e-14)
+    assert np.isclose(packed @ F.pack_symmetric(other),
+                      np.sum(cores * other),
+                      rtol=1e-13)
+    pack = F._packing_matrix(4)
+    assert np.allclose(pack.T @ pack, np.eye(10), atol=1e-15)
+
+
+@pytest.mark.parametrize("rho", [0.0, 1.0e-3])
+def test_dense_gram_matches_the_matrix_free_operator(rho):
+    # G + 2 rho I in packed coordinates must reproduce (A + 2 rho I) Z for
+    # random symmetric Z, to float64 precision on this well-scaled system.
+    import cudaq_algorithms.double_factorization._factorization as F
+    eri = _synthetic_eri(n=4, num_vectors=5, seed=9)
+    xp, eri_dev, rotations, op = _inner_setup("numpy", eri, 3, rho)
+    pre = F._DenseCholeskyPreconditioner(op)
+    rng = np.random.default_rng(1)
+    for _ in range(3):
+        z = rng.standard_normal((3, 4, 4))
+        z = 0.5 * (z + z.transpose(0, 2, 1))
+        dense = (pre.gram +
+                 2.0 * rho * np.eye(pre.packed_dim)) @ F.pack_symmetric(z)
+        assert np.allclose(F.unpack_symmetric(dense, 3, 4),
+                           op.apply(z),
+                           rtol=1e-12,
+                           atol=1e-12)
+    assert np.allclose(pre.gram, pre.gram.T, atol=1e-13)
+
+
+def test_dense_preconditioner_application_matches_an_independent_solve():
+    import cudaq_algorithms.double_factorization._factorization as F
+    eri = _synthetic_eri(n=4, num_vectors=5, seed=9)
+    rng = np.random.default_rng(2)
+    # rho > 0: plain shifted inverse, no projection.
+    xp, eri_dev, rotations, op = _inner_setup("numpy", eri, 3, 1.0e-3)
+    pre = F._DenseCholeskyPreconditioner(op)
+    assert pre.null_dim == 0 and pre.projector_basis is None
+    shifted = pre.gram + (2.0e-3 + pre.eta) * np.eye(pre.packed_dim)
+    r = rng.standard_normal((3, 4, 4))
+    r = 0.5 * (r + r.transpose(0, 2, 1))
+    expected = np.linalg.solve(shifted, F.pack_symmetric(r))
+    assert np.allclose(F.pack_symmetric(pre.apply(r)), expected, rtol=1e-11)
+    # rho = 0: projected inverse Q B^-1 Q; symmetric and positive definite on
+    # the retained subspace, zero on the null space.
+    xp, eri_dev, rotations, op0 = _inner_setup("numpy", eri, 3, 0.0)
+    pre0 = F._DenseCholeskyPreconditioner(op0)
+    assert pre0.null_dim >= 1
+    basis = pre0.projector_basis
+    q = basis @ basis.T
+    shifted0 = pre0.gram + pre0.eta * np.eye(pre0.packed_dim)
+    vectors = rng.standard_normal((4, pre0.packed_dim))
+    applied = np.stack([
+        F.pack_symmetric(pre0.apply(F.unpack_symmetric(v, 3, 4)))
+        for v in vectors
+    ])
+    expected = (q @ np.linalg.solve(shifted0, (q @ vectors.T))).T
+    assert np.allclose(applied, expected, rtol=1e-10, atol=1e-12)
+    gram = vectors @ applied.T
+    assert np.allclose(gram, gram.T, atol=1e-10)
+    retained = vectors @ q
+    assert np.all(np.einsum("ij,ij->i", retained, applied) > 0.0)
+    null_vector = F.unpack_symmetric(np.linalg.svd(pre0.gram)[2][-1], 3,
+                                     4)  # smallest singular direction
+    assert np.linalg.norm(F.pack_symmetric(pre0.apply(null_vector))) < 1e-8
+
+
+def test_dense_shift_stays_out_of_the_physical_residual():
+    # Solve the *shifted* system exactly; its residual against the original
+    # operator is eta * x, which the diagnostics must report (and fail on)
+    # rather than the zero residual of the shifted system.
+    import cudaq_algorithms.double_factorization._factorization as F
+    eri = _synthetic_eri(n=4, num_vectors=5, seed=9)
+    xp, eri_dev, rotations, op = _inner_setup("numpy", eri, 3, 1.0e-3)
+    pre = F._DenseCholeskyPreconditioner(op)
+    assert pre.eta > 0.0
+    x_shifted = pre.apply(op.rhs)  # B^-1 R exactly
+    residual = op.residual(x_shifted)
+    assert np.allclose(residual, pre.eta * x_shifted, rtol=1e-8, atol=1e-14)
+    ratio = np.linalg.norm(residual) / op.rhs_norm
+    assert ratio > 1.0e-12  # visible against a 1e-12 request ...
+    _, diag = F._solve_inner_cores_cg(eri_dev,
+                                      rotations,
+                                      xp,
+                                      1.0e-3,
+                                      tolerance=1.0e-12,
+                                      max_iterations=0,
+                                      initial_guess=x_shifted,
+                                      preconditioner="dense_cholesky",
+                                      operator=op)
+    assert diag.converged is False and diag.termination == "max_iterations"
+    assert np.isclose(diag.residual_norm, np.linalg.norm(residual), rtol=1e-8)
+    # ... and the operator and objective are untouched by eta.
+    assert op.regularization == 1.0e-3
+
+
+@pytest.mark.parametrize("rho", [0.0, 1.0e-3])
+def test_dense_pcg_converges_and_matches_lstsq(rho):
+    import cudaq_algorithms.double_factorization._factorization as F
+    from cudaq_algorithms.double_factorization._backend import to_numpy
+    eri = _synthetic_eri(n=5, num_vectors=6, seed=4)
+    xp, eri_dev, rotations, op = _inner_setup("numpy", eri, 5, rho)
+    cores, diag = F._solve_inner_cores_cg(eri_dev,
+                                          rotations,
+                                          xp,
+                                          rho,
+                                          tolerance=1.0e-10,
+                                          preconditioner="dense_cholesky",
+                                          operator=op)
+    assert diag.converged and diag.preconditioner == "dense_cholesky"
+    assert diag.details["packed_dim"] == 5 * 15
+    assert diag.details["setup_seconds"] > 0.0
+    assert diag.details["solve_seconds"] >= diag.details["setup_seconds"]
+    ref_cores, ref = F._solve_inner_cores_lstsq(eri_dev,
+                                                rotations,
+                                                xp,
+                                                rho,
+                                                operator=op)
+    recon = to_numpy(F._reconstruct_dev(rotations, cores, xp))
+    recon_ref = to_numpy(F._reconstruct_dev(rotations, ref_cores, xp))
+    assert np.linalg.norm(recon - recon_ref) < 1e-8 * max(
+        1.0, np.linalg.norm(recon_ref))
+    if rho > 0.0:
+        # Unique solution: the cores agree too.
+        assert np.allclose(np.stack([to_numpy(c) for c in cores]),
+                           np.stack([to_numpy(c) for c in ref_cores]),
+                           atol=1e-8)
+
+
+def test_dense_pcg_identical_leaves_at_zero_regularization():
+    # Duplicate rotations: the design null space contains (W, -W) for every
+    # symmetric W. Dense PCG must detect it, converge on the physical
+    # residual, and agree with lstsq on the fitted tensor (not the cores).
+    import cudaq_algorithms.double_factorization._factorization as F
+    eri = _synthetic_eri(n=3, num_vectors=2, seed=4)
+    u = np.linalg.qr(np.random.default_rng(1).standard_normal((3, 3)))[0]
+    rotations = [u, u.copy()]
+    op = F._InnerOperator(eri, rotations, np, 0.0)
+    pre = F._DenseCholeskyPreconditioner(op)
+    assert pre.null_dim >= 6  # all (W, -W), dim n(n+1)/2
+    cores, diag = F._solve_inner_cores_cg(eri,
+                                          rotations,
+                                          np,
+                                          0.0,
+                                          preconditioner="dense_cholesky",
+                                          operator=op)
+    assert diag.converged, diag
+    ref_cores, _ = F._solve_inner_cores_lstsq(eri, rotations, np, operator=op)
+    assert np.linalg.norm(
+        F._reconstruct_dev(rotations, cores, np) -
+        F._reconstruct_dev(rotations, ref_cores, np)) < 1e-9
+    # Minimum-norm on the retained subspace: no (W, -W) component.
+    assert np.allclose(cores[0], cores[1], atol=1e-9)
+
+
+def test_dense_pcg_termination_and_contract():
+    import cudaq_algorithms.double_factorization._factorization as F
+    eri = _synthetic_eri(n=4, num_vectors=5, seed=9)
+    xp, eri_dev, rotations, op = _inner_setup("numpy", eri, 3, 1.0e-3)
+    # Zero RHS.
+    zeros = F._InnerOperator(np.zeros((4, 4, 4, 4)), rotations, np, 1.0e-3)
+    cores, diag = F._solve_inner_cores_cg(np.zeros((4, 4, 4, 4)),
+                                          rotations,
+                                          np,
+                                          1.0e-3,
+                                          preconditioner="dense_cholesky",
+                                          operator=zeros)
+    assert diag.termination == "zero_rhs" and all(
+        np.allclose(c, 0.0) for c in cores)
+    # Already-converged guess: zero iterations.
+    solved, _ = F._solve_inner_cores_cg(eri_dev,
+                                        rotations,
+                                        xp,
+                                        1.0e-3,
+                                        preconditioner="dense_cholesky",
+                                        operator=op)
+    _, again = F._solve_inner_cores_cg(eri_dev,
+                                       rotations,
+                                       xp,
+                                       1.0e-3,
+                                       initial_guess=np.stack(solved),
+                                       preconditioner="dense_cholesky",
+                                       operator=op)
+    assert again.converged and again.iterations == 0
+    # Exhausted budget on a nontrivial system follows the requested target.
+    _, capped = F._solve_inner_cores_cg(eri_dev,
+                                        rotations,
+                                        xp,
+                                        1.0e-3,
+                                        tolerance=1.0e-14,
+                                        max_iterations=1,
+                                        preconditioner="dense_cholesky",
+                                        operator=op)
+    assert capped.converged == (capped.residual_ratio <= 1.0e-14)
+    assert capped.iterations == 1
+    assert capped.termination in ("max_iterations", "converged")
+
+
+def test_dense_pcg_guards_and_backend_rejection(monkeypatch):
+    import cudaq_algorithms.double_factorization._factorization as F
+    eri = _synthetic_eri(n=4, num_vectors=5, seed=9)
+    xp, eri_dev, rotations, op = _inner_setup("numpy", eri, 3, 0.0)
+    with pytest.raises(ValueError, match="at most 10 orbitals"):
+        F._DenseCholeskyPreconditioner.check_limits(11, 11)
+    with pytest.raises(ValueError, match="leaves"):
+        F._DenseCholeskyPreconditioner.check_limits(4, 9)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(F, "DENSE_CHOLESKY_MAX_BYTES", 1)
+        with pytest.raises(ValueError, match="MiB"):
+            F._solve_inner_cores_cg(eri_dev,
+                                    rotations,
+                                    xp,
+                                    preconditioner="dense_cholesky",
+                                    operator=op)
+    # The H10 / 20-leaf setup fits the default budget.
+    assert F._DenseCholeskyPreconditioner.estimate_bytes(
+        10, 20) < F.DENSE_CHOLESKY_MAX_BYTES
+    # Limits run before any large allocation.
+    calls = []
+    mp2 = pytest.MonkeyPatch()
+    mp2.setattr(np, "kron", lambda *a, **k: calls.append(1) or np.kron(*a))
+    with pytest.raises(ValueError):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(F, "DENSE_CHOLESKY_MAX_ORBITALS", 3)
+            F._DenseCholeskyPreconditioner(op)
+    mp2.undo()
+    assert calls == []
+    # Public API: the option is keyword-only and the old positional call works.
+    fit = df.compressed_double_factorization(
+        eri,
+        3,
+        1,
+        1e-10,
+        1e-3,
+        "cg",
+        1e-10,
+        None,
+        True,
+        None,
+        None,
+        "numpy",
+        cg_preconditioner="dense_cholesky")
+    assert fit.inner_solve.preconditioner == "dense_cholesky"
+    assert fit.inner_solve.converged
+    if "cupy" in _BACKENDS:
+        with pytest.raises(ValueError, match="NumPy backend only"):
+            df.compressed_double_factorization(
+                eri,
+                num_leaves=3,
+                max_iterations=1,
+                inner_solver="cg",
+                backend="cupy",
+                cg_preconditioner="dense_cholesky")

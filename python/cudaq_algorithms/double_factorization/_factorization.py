@@ -20,8 +20,9 @@ fewer leaves at equal accuracy.
 """
 from __future__ import annotations
 
-import warnings
 import math
+import time
+import warnings
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -57,10 +58,13 @@ class InnerSolveDiagnostics:
       residual passed the threshold while the verified residual stopped
       improving (stagnation).
 
-    ``solver`` is ``"cg"`` or ``"lstsq"``; ``preconditioner`` is ``"none"``
-    or ``"pairwise"``; ``fallback`` names the direct solver that produced
+    ``solver`` is ``"cg"`` or ``"lstsq"``; ``preconditioner`` is ``"none"``,
+    ``"pairwise"``, or ``"dense_cholesky"``; ``fallback`` names the direct solver that produced
     the cores when the iterative solve did not converge (``None``
-    otherwise), and ``message`` carries free-form detail.
+    otherwise), ``message`` carries free-form detail, and ``details`` holds
+    preconditioner- or timing-specific numbers (for ``"dense_cholesky"``:
+    packed dimension, memory estimate, shift, null-space dimension and
+    cutoff, setup and solve times).
     """
 
     solver: str
@@ -74,6 +78,7 @@ class InnerSolveDiagnostics:
     tolerance: float
     fallback: Optional[str] = None
     message: str = ""
+    details: Dict[str, object] = field(default_factory=dict)
 
     @property
     def residual_ratio(self) -> float:
@@ -527,7 +532,207 @@ class _PairwisePreconditioner:
         return out
 
 
-_PRECONDITIONERS = ("none", "pairwise")
+# Limits for the dense Cholesky preconditioner (``cg_preconditioner=
+# "dense_cholesky"``): it assembles the full packed normal matrix, so it is
+# an explicit small-system option. The memory budget bounds the estimate of
+# ``_DenseCholeskyPreconditioner.estimate_bytes`` (normal matrix, shifted
+# copy, Cholesky factor, eigenvectors at rho = 0, Kronecker workspace).
+DENSE_CHOLESKY_MAX_ORBITALS = 10
+DENSE_CHOLESKY_MAX_LEAVES_PER_ORBITAL = 2
+DENSE_CHOLESKY_MAX_BYTES = 256 << 20
+DENSE_CHOLESKY_SHIFT_FACTOR = 1.0e-8  # eta = factor * max(diag(G))
+DENSE_CHOLESKY_NULL_CUTOFF = 1.0e-12  # relative to max |eigenvalue| of G
+
+
+def _packing_matrix(n: int) -> np.ndarray:
+    """Orthonormal basis of the symmetric ``n x n`` matrices as columns of an
+    ``(n^2, n(n+1)/2)`` matrix: ``vec(E_kk)`` for the diagonal and
+    ``(vec(E_kl) + vec(E_lk)) / sqrt(2)`` for ``k < l``. Packing a symmetric
+    ``Z`` as ``P^T vec(Z)`` preserves the Frobenius inner product."""
+    rows, cols = np.triu_indices(n)
+    m = rows.shape[0]
+    pack = np.zeros((n * n, m))
+    for index, (k, l) in enumerate(zip(rows, cols)):
+        if k == l:
+            pack[k * n + k, index] = 1.0
+        else:
+            pack[k * n + l, index] = pack[l * n + k,
+                                          index] = 1.0 / math.sqrt(2.0)
+    return pack
+
+
+def pack_symmetric(cores: np.ndarray) -> np.ndarray:
+    """Pack a stack of symmetric ``(T, n, n)`` cores into one vector of
+    length ``T n(n+1)/2`` in the orthonormal coordinates of
+    :func:`_packing_matrix` (diagonal weight 1, off-diagonal ``sqrt(2)``)."""
+    cores = np.asarray(cores, dtype=float)
+    n = cores.shape[-1]
+    rows, cols = np.triu_indices(n)
+    weights = np.where(rows == cols, 1.0, math.sqrt(2.0))
+    return (cores[:, rows, cols] * weights).reshape(-1)
+
+
+def unpack_symmetric(vector: np.ndarray, num_leaves: int,
+                     n: int) -> np.ndarray:
+    """Inverse of :func:`pack_symmetric`: ``(T, n, n)`` symmetric cores."""
+    rows, cols = np.triu_indices(n)
+    weights = np.where(rows == cols, 1.0, math.sqrt(2.0))
+    packed = np.asarray(vector, dtype=float).reshape(num_leaves, rows.shape[0])
+    values = packed / weights
+    cores = np.zeros((num_leaves, n, n))
+    cores[:, rows, cols] = values
+    cores[:, cols, rows] = values
+    return cores
+
+
+class _DenseCholeskyPreconditioner:
+    """Dense Cholesky preconditioner for :class:`_InnerOperator` (NumPy only).
+
+    In the orthonormal packed coordinates of :func:`_packing_matrix` the
+    operator ``A`` is the symmetric ``d x d`` Gram matrix ``G`` with blocks
+    ``G_tu = P^T (M_tu (x) M_tu) P`` (the congruence ``Z -> M_tu Z M_tu^T``
+    restricted to symmetric matrices), ``d = T n(n+1)/2``. The
+    preconditioner factors ``B = G + 2 rho I + eta I`` once per inner solve
+    (``eta = DENSE_CHOLESKY_SHIFT_FACTOR * max(diag G)``) and applies
+    ``B^{-1}`` through triangular solves. The shift belongs to ``B`` only;
+    the solve, its residual checks, and the objective use the original
+    operator ``A + 2 rho I``.
+
+    At ``rho = 0`` the original system may be singular. ``G`` is
+    eigendecomposed, eigenvalues below ``DENSE_CHOLESKY_NULL_CUTOFF *
+    max |lambda|`` are classified as numerical null space (a materially
+    negative eigenvalue raises), and both the initial guess and the
+    preconditioned residual are projected onto the retained subspace, so the
+    returned cores are the numerical minimum-norm representative on that
+    subspace. Physical residuals are always measured with the original
+    operator on the full space.
+
+    Resource limits (``DENSE_CHOLESKY_MAX_ORBITALS``,
+    ``DENSE_CHOLESKY_MAX_LEAVES_PER_ORBITAL``, ``DENSE_CHOLESKY_MAX_BYTES``)
+    are checked by :meth:`check_limits` before any large allocation.
+    """
+
+    def __init__(self, operator: _InnerOperator):
+        if operator.xp is not np:
+            raise ValueError(
+                "cg_preconditioner='dense_cholesky' is implemented for the "
+                "NumPy backend only; pass backend='numpy' or choose 'none' "
+                "or 'pairwise'.")
+        start = time.perf_counter()
+        n, num_leaves = operator.n, operator.num_leaves
+        self.check_limits(n, num_leaves)
+        self.n, self.num_leaves = n, num_leaves
+        pack = _packing_matrix(n)
+        m = pack.shape[1]
+        self.packed_dim = num_leaves * m
+        gram = np.empty((self.packed_dim, self.packed_dim))
+        metric = np.asarray(operator.metric)
+        for t in range(num_leaves):
+            for u in range(num_leaves):
+                block = pack.T @ np.kron(metric[t, u], metric[t, u]) @ pack
+                gram[t * m:(t + 1) * m, u * m:(u + 1) * m] = block
+        asymmetry = float(np.abs(gram - gram.T).max())
+        scale = float(np.abs(gram).max())
+        if asymmetry > 1.0e-10 * max(scale, 1.0):
+            raise RuntimeError(
+                f"packed normal matrix is not symmetric (max asymmetry "
+                f"{asymmetry:.3e} at scale {scale:.3e})")
+        gram = 0.5 * (gram + gram.T)
+        self.gram = gram
+        self.regularization = operator.regularization
+        self.eta = DENSE_CHOLESKY_SHIFT_FACTOR * float(np.max(np.diag(gram)))
+        shifted = gram + (2.0 * operator.regularization + self.eta) * np.eye(
+            self.packed_dim)
+        try:
+            self.factor = scipy.linalg.cho_factor(shifted, lower=True)
+        except np.linalg.LinAlgError as error:
+            raise RuntimeError(
+                "dense Cholesky preconditioner: factorization of the shifted "
+                f"normal matrix failed ({error}); eta={self.eta:.3e}, "
+                f"rho={operator.regularization:g}") from error
+        self.null_cutoff = None
+        self.null_dim = 0
+        self.projector_basis = None  # retained-subspace basis at rho = 0
+        if operator.regularization == 0.0:
+            eigenvalues, eigenvectors = np.linalg.eigh(gram)
+            largest = float(np.max(np.abs(eigenvalues)))
+            self.null_cutoff = DENSE_CHOLESKY_NULL_CUTOFF * largest
+            if float(eigenvalues.min()) < -self.null_cutoff:
+                raise RuntimeError(
+                    "dense Cholesky preconditioner: packed normal matrix has "
+                    f"a materially negative eigenvalue {eigenvalues.min():.3e}"
+                    f" (cutoff {self.null_cutoff:.3e})")
+            keep = eigenvalues > self.null_cutoff
+            self.null_dim = int((~keep).sum())
+            if self.null_dim:
+                self.projector_basis = eigenvectors[:, keep]
+        self.setup_seconds = time.perf_counter() - start
+
+    @classmethod
+    def estimate_bytes(cls, n: int, num_leaves: int) -> int:
+        """Conservative peak-memory estimate of :meth:`__init__`: the Gram
+        matrix, its shifted copy, the Cholesky factor, the eigenvector
+        matrix (rho = 0), the Kronecker workspace, and the packing matrix."""
+        m = n * (n + 1) // 2
+        d = num_leaves * m
+        return 8 * (4 * d * d + 2 * n**4 + 2 * n * n * m + 4 * d)
+
+    @classmethod
+    def check_limits(cls, n: int, num_leaves: int) -> None:
+        if n > DENSE_CHOLESKY_MAX_ORBITALS:
+            raise ValueError(
+                f"cg_preconditioner='dense_cholesky' supports at most "
+                f"{DENSE_CHOLESKY_MAX_ORBITALS} orbitals (got {n}); use "
+                "'pairwise' or 'none'.")
+        if num_leaves > DENSE_CHOLESKY_MAX_LEAVES_PER_ORBITAL * n:
+            raise ValueError(
+                f"cg_preconditioner='dense_cholesky' supports at most "
+                f"{DENSE_CHOLESKY_MAX_LEAVES_PER_ORBITAL} * n = "
+                f"{DENSE_CHOLESKY_MAX_LEAVES_PER_ORBITAL * n} leaves at n={n} "
+                f"(got {num_leaves}); use 'pairwise' or 'none'.")
+        estimate = cls.estimate_bytes(n, num_leaves)
+        if estimate > DENSE_CHOLESKY_MAX_BYTES:
+            raise ValueError(
+                f"cg_preconditioner='dense_cholesky' setup would need about "
+                f"{estimate / 2**20:.0f} MiB, above the "
+                f"{DENSE_CHOLESKY_MAX_BYTES / 2**20:.0f} MiB budget "
+                "(DENSE_CHOLESKY_MAX_BYTES); use 'pairwise' or 'none'.")
+
+    def project(self, z: np.ndarray) -> np.ndarray:
+        """Projection of stacked cores onto the retained subspace (identity
+        unless a null space was found at rho = 0)."""
+        if self.projector_basis is None:
+            return z
+        packed = pack_symmetric(z)
+        packed = self.projector_basis @ (self.projector_basis.T @ packed)
+        return unpack_symmetric(packed, self.num_leaves, self.n)
+
+    def apply(self, r: np.ndarray) -> np.ndarray:
+        """``Q B^{-1} Q r`` for a stacked ``(T, n, n)`` array (``Q`` the
+        retained-subspace projector, identity at rho > 0)."""
+        packed = pack_symmetric(r)
+        if self.projector_basis is not None:
+            packed = self.projector_basis @ (self.projector_basis.T @ packed)
+        solved = scipy.linalg.cho_solve(self.factor, packed)
+        if self.projector_basis is not None:
+            solved = self.projector_basis @ (self.projector_basis.T @ solved)
+        return unpack_symmetric(solved, self.num_leaves, self.n)
+
+    def details(self) -> Dict[str, object]:
+        return {
+            "backend": "numpy",
+            "dtype": "float64",
+            "packed_dim": self.packed_dim,
+            "memory_estimate_bytes":
+            self.estimate_bytes(self.n, self.num_leaves),
+            "eta": self.eta,
+            "null_dim": self.null_dim,
+            "null_cutoff": self.null_cutoff,
+            "setup_seconds": self.setup_seconds,
+        }
+
+
+_PRECONDITIONERS = ("none", "pairwise", "dense_cholesky")
 
 # Default CG iteration cap as a multiple of the system dimension
 # ``num_leaves * n^2``. Exact arithmetic needs at most the dimension; in
@@ -576,7 +781,10 @@ def _solve_inner_cores_cg(
     system dimension ``num_leaves * n^2``; an explicit value is used as given.
     ``initial_guess`` (a stacked ``(num_leaves, n, n)`` array) warm-starts CG.
     ``preconditioner="pairwise"`` applies :class:`_PairwisePreconditioner`
-    (eigenvalue floor ``preconditioner_floor``); ``"none"`` is plain CG.
+    (eigenvalue floor ``preconditioner_floor``); ``"dense_cholesky"`` applies
+    :class:`_DenseCholeskyPreconditioner` (NumPy only, small systems; its
+    limits are checked before allocation and an out-of-range request
+    raises); ``"none"`` is plain CG.
     ``operator`` reuses an already-built :class:`_InnerOperator`.
 
     Returns ``(cores, diagnostics)``. The cores are returned with their
@@ -594,9 +802,9 @@ def _solve_inner_cores_cg(
     rhs_norm = op.rhs_norm
     threshold = float(tolerance) * rhs_norm
 
-    def diagnostics(z, iterations, termination, message=""):
+    def diagnostics(z, iterations, termination, message="", details=None):
         residual_norm = op.residual_norm(z)
-        converged = residual_norm <= threshold
+        converged = math.isfinite(residual_norm) and residual_norm <= threshold
         return InnerSolveDiagnostics(
             solver="cg",
             preconditioner=preconditioner,
@@ -607,7 +815,8 @@ def _solve_inner_cores_cg(
             threshold=threshold,
             rhs_norm=rhs_norm,
             tolerance=float(tolerance),
-            message=message)
+            message=message,
+            details=dict(details or {}))
 
     def inner_product(x, y):
         return xp.sum(x * y)  # device scalar
@@ -629,15 +838,26 @@ def _solve_inner_cores_cg(
                                          rhs_norm=0.0,
                                          tolerance=float(tolerance))
 
-    apply_preconditioner = (_PairwisePreconditioner(op,
-                                                    preconditioner_floor).apply
-                            if preconditioner == "pairwise" else None)
+    solve_start = time.perf_counter()
+    preconditioner_object = None
+    if preconditioner == "pairwise":
+        preconditioner_object = _PairwisePreconditioner(
+            op, preconditioner_floor)
+    elif preconditioner == "dense_cholesky":
+        preconditioner_object = _DenseCholeskyPreconditioner(op)
+    apply_preconditioner = (preconditioner_object.apply
+                            if preconditioner_object is not None else None)
+    extra_details: Dict[str, object] = {}
+    if preconditioner == "dense_cholesky":
+        extra_details = preconditioner_object.details()
 
     if initial_guess is None:
         z = xp.zeros((num_leaves, n, n))
         residual = op.rhs.copy()  # r = R - A(0)
     else:
         z = symmetrize(xp.asarray(initial_guess))
+        if preconditioner == "dense_cholesky":
+            z = preconditioner_object.project(z)
         residual = op.residual(z)
 
     def restart(residual):
@@ -710,9 +930,9 @@ def _solve_inner_cores_cg(
         residual_norm_sq = inner_product(residual, residual)
 
     z = symmetrize(z)
-    return [z[t]
-            for t in range(num_leaves)], diagnostics(z, iterations,
-                                                     termination, message)
+    extra_details["solve_seconds"] = time.perf_counter() - solve_start
+    return [z[t] for t in range(num_leaves)
+            ], diagnostics(z, iterations, termination, message, extra_details)
 
 
 def _lstsq(design: DeviceArray, target: DeviceArray,
@@ -1033,9 +1253,13 @@ def compressed_double_factorization(
     (default ``max(cg_tolerance, 1e-6)``) solves the *in-loop* systems only
     loosely (an inexact inner solve; the gradient need only be approximate by
     the envelope theorem) while the single final solve is tightened to
-    ``cg_tolerance``. ``cg_preconditioner`` selects ``"none"`` (plain CG) or
+    ``cg_tolerance``. ``cg_preconditioner`` selects ``"none"`` (plain CG),
     ``"pairwise"`` (pairwise block-Jacobi preconditioning, which captures the
-    coupling between the most-overlapping leaf pairs exactly). With
+    coupling between the most-overlapping leaf pairs exactly), or
+    ``"dense_cholesky"`` (a Cholesky factorization of the full packed normal
+    matrix; NumPy backend only, at most ``DENSE_CHOLESKY_MAX_ORBITALS``
+    orbitals and ``2 n`` leaves within ``DENSE_CHOLESKY_MAX_BYTES``, raising
+    an explicit error outside those limits). With
     ``inner_fallback="lstsq"`` a CG solve that does not reach its tolerance is
     redone with the direct solver when the explicit design matrix fits in
     ``LSTSQ_FALLBACK_MAX_BYTES``; the default ``"none"`` keeps the CG result

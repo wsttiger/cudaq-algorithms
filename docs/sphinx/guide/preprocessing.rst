@@ -348,6 +348,25 @@ cuts the iteration count where the coupling is dominated by leaf pairs;
 systems whose coupling spans many leaves gain little from it. The default
 ``"none"`` is plain CG.
 
+``cg_preconditioner="dense_cholesky"`` is the explicit small-system option:
+it assembles the full normal matrix of the inner system in orthonormal
+packed coordinates (dimension ``T n(n+1)/2``), factors it once per inner
+solve with a Cholesky decomposition of the shifted matrix ``G + 2 rho I +
+eta I`` (``eta = 1e-8 max diag G``, a shift that belongs to the
+preconditioner only, never to the operator, residual, or objective), and
+applies the inverse through triangular solves. At ``rho = 0`` the
+numerical null space of the normal matrix (eigenvalues below ``1e-12`` of
+the largest) is projected out of the initial guess and the preconditioned
+residual, so the returned cores are the minimum-norm representative on the
+retained subspace; convergence is still judged on the full-space residual
+of the original operator. It runs on the NumPy backend only, for at most
+``DENSE_CHOLESKY_MAX_ORBITALS`` (10) orbitals and ``2 n`` leaves within a
+``DENSE_CHOLESKY_MAX_BYTES`` (256 MiB) setup estimate, and raises an
+explicit error outside those limits instead of substituting another
+preconditioner. The ``details`` of its :class:`InnerSolveDiagnostics`
+record the packed dimension, memory estimate, shift, null-space dimension
+and cutoff, and setup and solve times.
+
 Inner-solve contract and diagnostics
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
