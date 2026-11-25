@@ -13,12 +13,14 @@ unary-iteration SELECT or as the SELECT-SWAP / QROAM construction of
 Low, Kliuchnikov and Schaeffer (`arXiv:1812.00954`), either one
 optionally under an external control (``controlled=True``).
 
-Everything here is strictly unitary: the papers' headline Toffoli counts
-assume measurement-based ancilla uncomputation, which this library does
-not use (primitives must stay statevector-testable and
-inverse-composable); the module docstrings state the coherent costs the
-minted kernels actually have, and the resource tests pin them against
-the compiler.
+These lookup/unary kernels are coherent: the papers' cheaper
+measurement-assisted AND-uncomputation prices do not describe their tapes.
+Module docstrings state actual costs, pinned against the compiler.
+The separate ``QROMErase`` extension measures a clean known lookup output
+and corrects its address phase through classical feed-forward; it is a
+channel, not an arbitrary XOR inverse or a quantum-controllable kernel.
+``PhaseGradient`` supplies reusable catalytic arithmetic phases, with its
+resource-state preparation and per-use CDKM cost declared separately.
 
 The reversible integer arithmetic device kernels (:mod:`._arithmetic`)
 are the in-place little-endian adders and comparators the lookup-based
@@ -41,7 +43,7 @@ priced by ``variant="auto"``, and the CDKM comparator — realizing a
 weighted index-register marginal exactly, up to a derived ``mu``-bit
 discretization bound.
 
-Composition: minted kernels are building blocks — call them from your
+Composition of coherent kernels: call them from your
 own kernels, and wrap the whole composition in ``cudaq.control`` to
 obtain the controlled operation. This is the intended consumption model
 for SELECT-style constructions (the select_swap QROM is itself a parent
@@ -69,11 +71,15 @@ from ._arithmetic import (add_constant, add_constant_qft, add_register,
                           subtract_constant, subtract_constant_qft,
                           subtract_register)
 from ._qrom import QROM
+from ._phase_gradient import PhaseGradient
+from ._qrom_erasure import QROMErase
 from ._unary_iteration import UnaryIterationKernels, unary_iteration_kernels
 
 __all__ = [
     "AliasSamplingPrepare",
     "QROM",
+    "PhaseGradient",
+    "QROMErase",
     "UnaryIterationKernels",
     "add_constant",
     "add_constant_qft",

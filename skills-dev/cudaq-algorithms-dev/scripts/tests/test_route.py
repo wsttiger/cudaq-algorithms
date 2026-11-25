@@ -105,10 +105,41 @@ def test_generic_protocol_words_do_not_cross_route(prompt, excluded):
     assert excluded not in router.route(prompt)
 
 
-def test_phase_estimation_gets_a_building_block_note():
-    assert any("not a packaged primitive" in note
-               for note in router.notes("Run QPE on this Hamiltonian."))
+def test_phase_estimation_routes_to_packaged_contract():
+    note=' '.join(router.notes("Run QPE on this Hamiltonian."))
+    assert "not a packaged primitive" not in note
+    assert "PhaseEstimation" in note
+    assert "qubitization/qubitization-phase-estimation.md" in router.focused_records("Run QPE.")
+    # A source-level test of the claim is available without importing CUDA-Q.
+    import ast
+    tree=ast.parse((ROOT/'python/cudaq_algorithms/phase_estimation.py').read_text())
+    cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='PhaseEstimation')
+    assert {'kernel','energies_from_counts'} <= {n.name for n in cls.body if isinstance(n,ast.FunctionDef)}
     assert router.notes("Construct a Krylov energy estimate.") == []
+
+
+def test_paper_fidelity_prioritizes_scope_over_excluded_methods():
+    prompt=('Implement THC arXiv:2011.03494 with paper fidelity, programmable angles, '
+            'QROM, phase gradient and coherent alias sampling. Sparse, DF and Trotter comparisons are excluded.')
+    assert router.route(prompt)==['paper-implementation.md','thc/thc-fidelity.md','basis-change/basis-change.md']
+
+
+@pytest.mark.parametrize('prompt,focused',[
+    ('Consume quantum angle words with fermion_basis_change.', 'basis-change/basis-change-programmable.md'),
+    ('Compile AngleEncoding and GivensStructure.', 'basis-change/basis-change-plan.md'),
+    ('Use phase_gradient_kernel for Givens rotations.', 'basis-change/basis-change-phase-gradient.md'),
+    ('Use QROMErase for measurement erasure.', 'primitives/primitives-qrom-erasure.md'),
+    ('Use UnaryPhaseEstimation with sine-window control.', 'qubitization/qubitization-unary-phase-estimation.md'),
+    ('Use THCPairPrepare for pair alias.', 'thc/thc-pair-prepare.md'),
+])
+def test_paper_api_focused_contracts(prompt,focused):
+    assert focused in router.focused_records(prompt)
+
+
+def test_ordinary_slater_preparation_does_not_require_paper_mechanisms():
+    records=router.route('Prepare a Slater determinant using Givens rotations.')
+    assert records[0]=='state-preparation/state-preparation.md'
+    assert not any(r.startswith(('thc/','basis-change/','paper-')) for r in records)
 
 
 @pytest.mark.parametrize("token,expected", [
@@ -525,8 +556,8 @@ def test_named_recovery_with_bell_input_keeps_its_algorithm_contract():
 @pytest.mark.parametrize("name", ["QPE", "quantum phase estimation"])
 def test_phase_estimation_with_bell_input_retains_building_block_note(name):
     output = route_cli(f"Use {name} with a Bell input state.", "--paths")
-    assert "not a packaged primitive" in output
-    assert "walk-step kernels" in output
+    assert "not a packaged primitive" not in output
+    assert "PhaseEstimation" in output
     assert "outside this skill" not in output
 
 

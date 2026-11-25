@@ -1,6 +1,6 @@
 # Circuit primitives - family front door
 
-Family operation + object: **build** a **strictly unitary fault-tolerant
+Family operation + object: **build** a **fault-tolerant
 circuit component (coherent table lookup, indexed SELECT walk, reversible
 integer arithmetic, weighted-index PREPARE) on caller-owned little-endian
 registers**.
@@ -13,12 +13,14 @@ registers**.
 | look up / a classical non-negative integer table into an output register, `|k>|y> -> |k>|y XOR data[k]>` | `cudaq_algorithms.primitives.QROM` | quantum operation; host construction + flat device kernel | none; caller-owned `address`, `ladder`, `output` views | [QROM](primitives-qrom.md) |
 | add, subtract, or compare / unsigned integers held in little-endian registers, in place | `add_register`, `subtract_register`, `add_constant`, `subtract_constant`, `cmp_ge_constant`, `cmp_ge_register`, `cmp_gt_register`, `qft`, `iqft`, `phase_add_constant`, `add_constant_qft`, `subtract_constant_qft`, `cmp_ge_constant_qft_shift`, `cmp_ge_constant_qft_shift_adj` | quantum operation; `@cudaq.kernel` device kernels called inside a caller kernel | none; caller-owned pairwise-disjoint views | [integer arithmetic](primitives-arithmetic.md) |
 | prepare / an index register whose amplitude magnitudes squared equal `w / lambda` (coherent alias sampling, with entangled garbage) | `cudaq_algorithms.primitives.AliasSamplingPrepare` | quantum operation; host preprocessing + composed device kernels | none; caller-owned `index`, `garbage` views; not a `BlockEncoding` member | [alias-sampling PREPARE](primitives-alias-sampling.md) |
+| apply / a word-controlled phase through modular addition | `cudaq_algorithms.primitives.PhaseGradient` | development device-kernel factory | prepared reusable resource; clean scratch | [phase-gradient resource](primitives-phase-gradient.md) |
+| erase / a clean known lookup output | `QROM.measurement_eraser`, `cudaq_algorithms.primitives.QROMErase` | development measured channel + correction | X measurements and classical feed-forward; no quantum control/adjoint | [measurement erasure](primitives-qrom-erasure.md) |
 
-Every primitive is strictly unitary: no mid-circuit measurement, no
-measurement-based ancilla uncomputation, and a hand-written inverse wherever
-one is needed (`kernel_adj`, `subtract_*`, `iqft`, `*_adj`,
-`adjoint_kernel()`); `cudaq.adjoint` is not used by the package on any of
-them. Clean ancillas (`ladder`, `work`, `carry`) are `|0>` on entry and are
+QROM lookup, unary iteration, arithmetic and alias preparation are coherent,
+with hand-written inverses (`kernel_adj`, `subtract_*`, `iqft`, `*_adj`,
+`adjoint_kernel()`). The separate optional `QROMErase` uses measurement and
+classical correction on a clean known lookup output; it is not a general inverse.
+Clean ancillas (`ladder`, `work`, `carry`) are `|0>` on entry and are
 returned to `|0>`. All registers are little-endian: qubit 0 of a view is the
 least-significant bit, matching the package-wide
 [ordering convention](../conventions/ordering.md).
@@ -40,9 +42,9 @@ QROM record.
 Import the subpackage directly: `from cudaq_algorithms.primitives import
 QROM, AliasSamplingPrepare, unary_iteration_kernels, add_register, ...`.
 Nothing in this family is re-exported from the `cudaq_algorithms` package
-root. No packaged algorithm family (`PauliLCU`, `Walk`, `QSVT`, `Trotter`,
-state preparation) imports this subpackage in current source; composing a
-primitive into a SELECT, PREPARE, or block encoding is caller work, and
+root. Packaged `PhaseEstimation` and development `UnaryPhaseEstimation`,
+`thc_prepare` and phase-gradient basis changes consume this subpackage.
+Composing a primitive into a custom SELECT/PREPARE remains caller work, and
 `AliasSamplingPrepare` is not a `BlockEncoding` and has no
 `prepare_kernel()`/`select_observable()` members.
 
@@ -65,14 +67,14 @@ with the `cat` command shown.
 
 | If the request claims or assumes | Verdict | Say (demanded words first) |
 | --- | --- | --- |
-| `QROM` or unary iteration costs `N - 1` Toffolis, or uses measurement-based uncomputation | false | **These primitives are strictly unitary; the fused walk costs exactly `3N/2 - 5` Toffolis on a full uncontrolled tree (`N >= 8`; 2 at `N = 4`, 0 at `N = 2`), `3N/2 - 1` controlled, fewer on partial trees, and `QROM.toffoli_count` reports the exact minted count (`W(address_bits, len(data))` for `"select"`, `2 W(high, ceil(N/B)) + 2 output_bits (B - 1)` for `"select_swap"`); the papers' `N - 1` and `ceil(N/B) + b(B-1)` price measurement-and-fixup uncomputation that is not provided.** Records: `cat <this skill's directory>/references/primitives/primitives-qrom.md`, `cat <this skill's directory>/references/primitives/primitives-unary-iteration.md` |
+| `QROM` or unary iteration costs `N - 1` Toffolis | false | Coherent lookup/unary kernels retain their actual ladder cost, `W` (`3N/2-5` for full uncontrolled N>=8). The separate `QROMErase` corrects a known lookup after measurement; it does not lower all coherent AND uncomputes to the paper price. See [lookup](primitives-qrom.md), [erasure](primitives-qrom-erasure.md). |
 | `toffoli_count` is a T count, transpiled gate count, or hardware cost | false | **`toffoli_count` is the exact number of logical two-controlled `x` gates in the emitted instruction tape, pinned by the tests against `cudaq.estimate_resources(...).count_controls("x", 2)`; it is not a T count, depth, runtime, memory, or measured cost.** Records: `cat <this skill's directory>/references/primitives/primitives.md`, `cat <this skill's directory>/references/conventions/resource-levels.md` |
 | `AliasSamplingPrepare` yields the clean state `sum_k sqrt(w_k/lambda) |k>|0...0>` | false | **The PREPARE leaves alias, keep, reference, and flag registers entangled with the index; only the index amplitude magnitudes squared equal the realized table distribution `W_k/(K 2^mu)` (within `discretization_bound = 1.5/(K 2^mu)` of `w/lambda`), and the garbage vectors are not orthogonal, so the reduced index state is not `diag(p_k)`; it is sound only inside a `PREPARE ... PREPARE^dagger` sandwich over the same registers using `adjoint_kernel()`.** Record: `cat <this skill's directory>/references/primitives/primitives-alias-sampling.md` |
-| The primitives are reachable from the package root, or `PauliLCU`/`Walk` use them internally | false | **Import `cudaq_algorithms.primitives` directly; nothing is re-exported from the package root, and no packaged algorithm family imports the subpackage in current source.** Record: `cat <this skill's directory>/references/primitives/primitives.md` |
+| Primitives are imported from the package root or never consumed internally | false | Import `cudaq_algorithms.primitives` directly. Phase estimation and development THC/phase-gradient components consume primitives; PauliLCU/Walk do not thereby gain a new lookup contract. See [source](../source-provenance.md). |
 | `cudaq.adjoint` can invert any primitive kernel, or `add_register(a, a, carry)` is defined | false | **Inverses are hand-written (`kernel_adj`, `subtract_register`, `subtract_constant`, `iqft`, `subtract_constant_qft`, `cmp_ge_constant_qft_shift_adj`, `adjoint_kernel()`); source states `cudaq.adjoint` is off-limits for the CDKM family and the walk kernels (cuda-quantum#4897/#4898), and the arithmetic kernels never alias-check, so overlapping views are undefined.** Records: `cat <this skill's directory>/references/primitives/primitives-arithmetic.md`, `cat <this skill's directory>/references/primitives/primitives-unary-iteration.md` |
 | Registers are big-endian, or `constant_bits[0]` is the most-significant bit | false | **Every register is little-endian: qubit 0 is the least-significant bit, `constant_bits[k]` is bit `k` of `K`, and `qft` omits the bit-reversal swaps so qubit `t` carries phase index `2^(t+1)`.** Records: `cat <this skill's directory>/references/primitives/primitives-arithmetic.md`, `cat <this skill's directory>/references/conventions/ordering.md` |
 | `cmp_ge_constant_qft_shift` leaves `x_reg` unchanged like `cmp_ge_constant` | false | **The Draper comparator XORs `out[0] ^= (x >= K)` and leaves `x_reg` shifted to `(x - K) mod 2^n` for `K >= 1`; restore with `cmp_ge_constant_qft_shift_adj` or `add_constant_qft(x_reg, K)`; the CDKM `cmp_ge_constant` restores `x_reg`, `work`, and `carry`.** Record: `cat <this skill's directory>/references/primitives/primitives-arithmetic.md` |
-| A controlled QROM or controlled PREPARE is a packaged contract | absent | **Only `unary_iteration_kernels(..., controlled=True)` mints a controlled walk (leading one-qubit `control` view); `QROM` and `AliasSamplingPrepare` have no `controlled` option, and `AliasSamplingPrepare` kernels call sub-kernels so source directs that they not be placed under `cudaq.control`; an external `cudaq.control` over a plain unary-iteration kernel is tested, over a QROM kernel it is unverified.** Records: `cat <this skill's directory>/references/primitives/primitives-unary-iteration.md`, `cat <this skill's directory>/references/primitives/primitives-alias-sampling.md` |
+| Controlled QROM and controlled alias PREPARE have the same packaged contract | false | `QROM(...,controlled=True)` takes `(control,address,ladder,output)` and reports its actual controlled cost. `AliasSamplingPrepare` has no equivalent controlled option. Measured erasure cannot be quantum-controlled. See [QROM](primitives-qrom.md), [alias](primitives-alias-sampling.md), [erasure](primitives-qrom-erasure.md). |
 
 ## Workflow
 

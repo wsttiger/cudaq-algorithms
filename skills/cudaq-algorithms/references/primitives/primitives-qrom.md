@@ -6,7 +6,7 @@ an output register, `|k>|y> -> |k>|y XOR data[k]>`**.
 ## Identity and classification
 
 - Public entry point: `cudaq_algorithms.primitives.QROM(data, address_bits,
-  output_bits, *, variant="auto", block_size=None)`.
+  output_bits, *, variant="auto", block_size=None, controlled=False)`.
 - Source/tests: `python/cudaq_algorithms/primitives/_qrom.py` and
   `tests/python/test_primitives_qrom.py`, `test_primitives_resources.py`.
 - Kind/role/layers: quantum operation, computational leaf; host construction
@@ -76,14 +76,16 @@ uncompute). These are logical counts pinned by the resource tests against
 `cudaq.estimate_resources(...).count_controls("x", 2)`; they are not T
 counts, transpiled depth, runtime, memory, or measured cost. The papers'
 headline prices (`N - 1` lookup Toffolis, `ceil(N/B) + output_bits (B - 1)`)
-assume measurement-based ancilla uncomputation, which is not provided; the
+assume cheaper measurement-based AND uncomputation; the coherent
 default `block_size` optimizes the coherent model (about
 `sqrt(3N / (2 output_bits))`), not the papers' `sqrt(N / output_bits)`.
 
-Not provided: a `controlled` option (only `unary_iteration_kernels` mints a
-controlled walk), dirty-ancilla QROAM, measurement-based uncomputation, a
-`kernel_adj` (the lookup is self-inverse), and any `BlockEncoding` member. An
-external `cudaq.control` over a QROM kernel is not tested and is unverified.
+`QROM(...,controlled=True)` is supported and adds a leading one-qubit
+`control` view. It changes ladder geometry and uses the controlled unary
+price; do not assume its scratch is identical to the uncontrolled object.
+`measurement_eraser()` creates a separate [measured known-lookup eraser](primitives-qrom-erasure.md).
+It does not invert arbitrary XOR output. Dirty-ancilla QROAM and a coherent
+`kernel_adj` are not provided (coherent lookup is self-inverse).
 
 ## Oracle and runnable evidence
 

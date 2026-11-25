@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from functools import cached_property
 
 from ._encoding import AngleEncoding
-from ._kernels import classical_kernel, programmable_kernel
+from ._kernels import (classical_kernel, programmable_kernel,
+                      programmable_split_kernel, phase_gradient_kernel)
+from ._kernels import one_particle_gradient_kernel
 from ._metrics import estimate_fermion_basis_change_error
 from ._plan import (_MAX_QUBIT_INDEX, GivensBasisChangeSchedule, _index,
                     _sequence, _validate_tolerance,
@@ -195,6 +197,87 @@ class FermionBasisChange:
     def adjoint_kernel(self):
         """Return the inverse, including all exact mode phases."""
         return self._inverse
+
+    @cached_property
+    def _split_forward(self):
+        return programmable_split_kernel(self.schedule, self.parameter_registers,
+                                         self.angle_encoding.weights)
+
+    @cached_property
+    def _split_inverse(self):
+        return programmable_split_kernel(self.schedule, self.parameter_registers,
+                                         self.angle_encoding.weights, adjoint=True)
+
+    def split_kernel(self, *, adjoint=False):
+        """Return ``(system, parameters)`` for caller-owned separate views.
+
+        Programmable plans only. ``system`` spans ``num_system_qubits``;
+        ``parameters`` spans ``num_qubits - num_system_qubits``. This is
+        useful inside block-encoding callbacks with separately allocated
+        system and oracle registers. No lookup or workspace is allocated.
+        """
+        if not self.is_programmable:
+            raise ValueError("split_kernel requires a programmable plan")
+        if not isinstance(adjoint, bool):
+            raise ValueError("adjoint must be a boolean")
+        return self._split_inverse if adjoint else self._split_forward
+
+    def phase_gradient_kernel(self, *, adjoint=False, parameter_slots=None):
+        """Return ``(system, parameters, gradient, scratch)`` arithmetic backend.
+
+        Requires a programmable plan with contiguous words. The gradient
+        resource width equals ``angle_bits``; prepare it once with
+        ``PhaseGradient(angle_bits).prepare_kernel()``. Scratch needs
+        ``angle_bits+1`` clean qubits. Resource and scratch are caller-owned.
+        The emitted phase operations cost ``4*angle_bits-2`` Toffolis each;
+        resource-state preparation and QROM are separate costs.
+
+        Optional ``parameter_slots`` packs just the named schedule slots,
+        in that order, into ``parameters``. The caller promises every omitted
+        word is exactly zero. This removes only identically zero data columns;
+        it does not substitute host angles for coherently selected words.
+        """
+        if not self.is_programmable:
+            raise ValueError('phase-gradient backend requires programmable angles')
+        if not isinstance(adjoint,bool):raise ValueError('adjoint must be a boolean')
+        from ..primitives import PhaseGradient
+        slots=self._gradient_slots(parameter_slots)
+        cache=self.__dict__.setdefault('_gradient_variants',{})
+        key=(adjoint,slots)
+        if key not in cache:
+            kernel=phase_gradient_kernel(self.schedule,self.parameter_registers,
+                                         PhaseGradient(self.angle_bits),adjoint,slots)
+            cache[key]=kernel
+        return cache[key]
+
+    def _gradient_slots(self,slots):
+        if slots is None:return None
+        slots=tuple(slots)
+        if (any(isinstance(s,bool) or not isinstance(s,int) or
+                not 0<=s<self.structure.num_parameters for s in slots) or
+                len(set(slots))!=len(slots)):
+            raise ValueError('parameter_slots must contain distinct schedule slot indices')
+        return slots
+
+    def one_particle_gradient_kernel(self,*,adjoint=False,parameter_slots=None):
+        """Two-mode one-particle sector on one logical qubit.
+
+        Signature and caller-owned word/catalyst/scratch views are the same
+        as phase_gradient_kernel. Logical |0>,|1> label the one-particle
+        occupations. This is explicitly a restricted sector, not general-N
+        or full-Fock synthesis. All relative and word-dependent phases remain.
+        """
+        if not self.is_programmable:raise ValueError('programmable plan required')
+        if not isinstance(adjoint,bool):raise ValueError('adjoint must be boolean')
+        from ..primitives import PhaseGradient
+        slots=self._gradient_slots(parameter_slots)
+        cache=self.__dict__.setdefault('_particle_variants',{})
+        key=(adjoint,slots)
+        if key not in cache:
+            kernel=one_particle_gradient_kernel(self.schedule,self.parameter_registers,
+                                                PhaseGradient(self.angle_bits),adjoint,slots)
+            cache[key]=kernel
+        return cache[key]
 
     def controlled_kernel(self, *, adjoint=False):
         """Return a kernel with enable at index zero and the base register after it.

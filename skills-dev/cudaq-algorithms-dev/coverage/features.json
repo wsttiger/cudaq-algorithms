@@ -653,6 +653,97 @@
         "cudaq_algorithms.primitives.AliasSamplingPrepare"
       ],
       "behavioral_evals": []
+    },
+    {
+      "id": "basis-change-plan",
+      "family": "basis-change",
+      "record": "references/basis-change/basis-change-plan.md",
+      "symbols": [
+        "cudaq_algorithms.basis_change.fermion_basis_change",
+        "cudaq_algorithms.basis_change.AngleEncoding"
+      ],
+      "behavioral_evals": []
+    },
+    {
+      "id": "basis-change-programmable",
+      "family": "basis-change",
+      "record": "references/basis-change/basis-change-programmable.md",
+      "symbols": [
+        "cudaq_algorithms.basis_change.FermionBasisChange.split_kernel"
+      ],
+      "behavioral_evals": []
+    },
+    {
+      "id": "basis-change-phase-gradient",
+      "family": "basis-change",
+      "record": "references/basis-change/basis-change-phase-gradient.md",
+      "symbols": [
+        "cudaq_algorithms.basis_change.FermionBasisChange.phase_gradient_kernel"
+      ],
+      "behavioral_evals": []
+    },
+    {
+      "id": "primitives-phase-gradient",
+      "family": "primitives",
+      "record": "references/primitives/primitives-phase-gradient.md",
+      "symbols": [
+        "cudaq_algorithms.primitives.PhaseGradient"
+      ],
+      "behavioral_evals": []
+    },
+    {
+      "id": "primitives-qrom-erasure",
+      "family": "primitives",
+      "record": "references/primitives/primitives-qrom-erasure.md",
+      "symbols": [
+        "cudaq_algorithms.primitives.QROMErase"
+      ],
+      "behavioral_evals": []
+    },
+    {
+      "id": "thc-domain",
+      "family": "thc",
+      "record": "references/thc/thc-domain.md",
+      "symbols": [
+        "cudaq_algorithms.thc_prepare.THCPairDomain"
+      ],
+      "behavioral_evals": []
+    },
+    {
+      "id": "thc-index",
+      "family": "thc",
+      "record": "references/thc/thc-index.md",
+      "symbols": [
+        "cudaq_algorithms.thc_prepare.TriangularIndex"
+      ],
+      "behavioral_evals": []
+    },
+    {
+      "id": "thc-pair-prepare",
+      "family": "thc",
+      "record": "references/thc/thc-pair-prepare.md",
+      "symbols": [
+        "cudaq_algorithms.thc_prepare.THCPairPrepare"
+      ],
+      "behavioral_evals": []
+    },
+    {
+      "id": "qubitization-phase-estimation",
+      "family": "qubitization",
+      "record": "references/qubitization/qubitization-phase-estimation.md",
+      "symbols": [
+        "cudaq_algorithms.PhaseEstimation"
+      ],
+      "behavioral_evals": []
+    },
+    {
+      "id": "qubitization-unary-phase-estimation",
+      "family": "qubitization",
+      "record": "references/qubitization/qubitization-unary-phase-estimation.md",
+      "symbols": [
+        "cudaq_algorithms.UnaryPhaseEstimation"
+      ],
+      "behavioral_evals": []
     }
   ],
   "support_records": [
@@ -681,6 +772,10 @@
     "references/state-preparation/ucc-parameterization.md",
     "references/trotter/trotter.md",
     "references/validation.md",
-    "references/workflow.md"
+    "references/workflow.md",
+    "references/paper-implementation.md",
+    "references/thc/thc-fidelity.md",
+    "references/thc/thc.md",
+    "references/basis-change/basis-change.md"
   ]
 }

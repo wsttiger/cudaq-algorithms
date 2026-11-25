@@ -24,6 +24,10 @@ REFS = Path(__file__).resolve().parent.parent / "references"
 # "adjoint" are too generic; qft routes only next to add/constant/phase/iqft.
 _QFT_ARITHMETIC = r"\biqft\b|\bqft\b.*(add|constant|phase)|(add|constant|phase).*\bqft\b"
 PRIMITIVES_LEAVES = [  # (regex, focused record); the front door is added too
+    (r"qromerase|measurement.eras|measured.eras|phase.fixup",
+     "primitives/primitives-qrom-erasure.md"),
+    (r"phasegradient|phase.gradient (?:resource|state|arithmetic)",
+     "primitives/primitives-phase-gradient.md"),
     (r"\bqrom\b|qroam|lookup table|table lookup|select.swap",
      "primitives/primitives-qrom.md"),
     (r"unary.iteration|unaryiterationkernels|select walk",
@@ -45,6 +49,11 @@ PRIMITIVES_NAMED = r"\bqrom\b|qroam|unary.iteration|select.swap|alias.?sampl|com
 # become a Trotter task). Generic words shared across families (controlled,
 # adjoint, convention, angles, compress, speedup) are deliberately absent.
 FAMILIES = [
+    ("basis-change/basis-change.md",
+     r"fermion_basis_change|fermionbasischange|angleencoding|givensstructure|programmable (?:angle|givens|basis)|quantum.angle.words|phase.gradient.*(?:basis|givens)",
+     r"fermion_basis_change|fermionbasischange|angleencoding|givensstructure|programmable (?:angle|givens|basis)|quantum.angle.words"),
+    ("thc/thc.md", r"thcpairdomain|thcpairprepare|triangularindex|\bthc\b|tensor.hypercontraction|2011\.03494",
+     r"thcpairdomain|thcpairprepare|triangularindex|\bthc\b|tensor.hypercontraction|2011\.03494"),
     ("state-preparation/operator-pools.md",
      r"operator pool|\bceo\b|uccgsd|upccgsd|excitation pool|amplitude optimi|optimi[sz]e the amplitudes",
      None),
@@ -232,6 +241,22 @@ def prepared_state_diagnostic(text: str, preparation: bool) -> bool:
 # These are supplemental focused paths, so named contracts survive MAX_RECORDS.
 # Rows: (request regex, starting family, focused record).
 FOCUSED_ROUTES = [
+    (r"angleencoding|givensstructure|compile_givens_basis_change",
+     "basis-change/basis-change.md", "basis-change/basis-change-plan.md"),
+    (r"fermion_basis_change|fermionbasischange|programmable (?:angle|givens|basis)|quantum.angle.words|split_kernel",
+     "basis-change/basis-change.md", "basis-change/basis-change-programmable.md"),
+    (r"phase_gradient_kernel|phase.gradient.*(?:basis|givens)|(?:basis|givens).*phase.gradient",
+     "basis-change/basis-change.md", "basis-change/basis-change-phase-gradient.md"),
+    (r"unaryphaseestimation|unary.phase.estimation|optimized phase.control|sine.window",
+     "qubitization/qubitization.md", "qubitization/qubitization-unary-phase-estimation.md"),
+    (r"\bphaseestimation\b|textbook.*(?:qpe|phase.estimation)|\bqpe\b|quantum phase estimation",
+     "qubitization/qubitization.md", "qubitization/qubitization-phase-estimation.md"),
+    (r"thcpairdomain|valid.*(?:pair|triangular).*domain",
+     "thc/thc.md", "thc/thc-domain.md"),
+    (r"triangularindex|contiguous pair index",
+     "thc/thc.md", "thc/thc-index.md"),
+    (r"thcpairprepare|pair.alias|triangular.*alias",
+     "thc/thc.md", "thc/thc-pair-prepare.md"),
     (r"\bphasesequence\b|\bqsp\b|"
      r"\bqsvt\b[^.;\n]*\b(?:phases?|angles?|sequences?|conventions?)\b|"
      r"\b(?:phases?|angles?|sequences?|conventions?)\b[^.;\n]*\bqsvt\b",
@@ -393,18 +418,15 @@ def mentions_molecule(text: str) -> bool:
         for token in re.findall(r"\b[A-Za-z][A-Za-z0-9]*\b", text))
 
 
-# Queries naming an algorithm that is not a packaged primitive get a note
-# with the packaged building blocks instead of a misroute.
+# Notes distinguish algorithms with different query/resource contracts.
 NOTES = [
     (r"phase estimation|\bqpe\b",
-     "Quantum phase estimation is not a packaged primitive. Building blocks: "
-     "the block encoding's walk-step kernels (`walk_step_kernel`, "
-     "`adjoint_walk_step_kernel`, their controlled forms, `prepare_kernel`) "
-     "and `Trotter` product-formula evolution; the self-verifying example "
-     "`docs/sphinx/examples/python/08_quantum_phase_estimation.py` runs one "
-     "QPE shell around exact, Trotter, and qubitization-walk oracles "
-     "(walk decoding E = -alpha*cos(theta)). Chebyshev moments/Krylov "
-     "(qubitization guide) estimate energies without a counting register."),
+     "PhaseEstimation(encoding).kernel(num_bits, state_prep=..., measure=True) "
+     "is packaged textbook binary QPE (2**m-1 controlled walk calls). "
+     "UnaryPhaseEstimation(encoding, queries) is the development sine-window "
+     "shared-reflection schedule, with one extra controlled walk for signed "
+     "decoding. Both decode E = -alpha*cos(theta); restore scalar shifts. "
+     "Do not transfer optimized paper prefactors to textbook QPE."),
 ]
 CHECKLIST = """
 ## Use the selected guides
@@ -424,6 +446,7 @@ def all_records() -> list[str]:
     out.extend(SHARED_RECORDS)
     out.append("quick-contract.md")
     out.append(HF_RECORD)
+    out.extend(("paper-implementation.md", "thc/thc-fidelity.md"))
     for _, family, focused in FOCUSED_ROUTES:
         out.extend((family, focused))
     for _, _, recs, compose in SCIENCE_ROUTES:
@@ -450,7 +473,7 @@ def standalone_kernel(text: str) -> bool:
     if any(re.search(pattern, low) for pattern, _, _ in FOCUSED_ROUTES):
         return False
     # A basic state used by a named algorithm is not a standalone kernel.
-    # Keep unsupported-algorithm notes reachable as well (for example QPE).
+    # Keep named algorithm notes reachable as well (for example QPE).
     if re.search(r"\brecover_real_time_evolution\b", low) or notes(text):
         return False
     if re.search(
@@ -499,6 +522,14 @@ def route(text: str) -> list[str]:
     if standalone_kernel(text):
         return []
     low = operation_text(text)
+    fidelity = bool(re.search(r"paper.fidelity|faithful|fidelity|implement.{0,40}paper", low))
+    if fidelity and re.search(r"\bthc\b|tensor.hypercontraction|2011\.03494", low):
+        # Scope statements often mention excluded algorithms. Keep the named
+        # paper ahead of incidental Trotter/DF words; focused links cover APIs.
+        return ["paper-implementation.md", "thc/thc-fidelity.md",
+                "basis-change/basis-change.md"]
+    if fidelity and re.search(r"\bpaper\b|arxiv", low):
+        return ["paper-implementation.md"]
     preparation = preparation_requested(text)
     # In a host norm request, LCU names the formula and the identity coefficient
     # names an excluded scalar offset. Neither calls for a simulation circuit.
@@ -684,6 +715,8 @@ def quick_contract_sections(records: list[str],
         {"Block-encode `H/alpha`", "Check the encoded block densely"},
         "qsvt": {"QSP/QSVT sequence"},
         "qubitization": {"Qubitization walk action"},
+        "basis-change": {"Programmable basis changes"},
+        "thc": {"THC pair preparation"},
         "trotter": {"Suzuki-Trotter"},
         "chemistry": {"Chemistry integrals"},
         "fermion-transforms": {"Fermion transforms"},

@@ -186,3 +186,155 @@ def programmable_kernel(schedule,
                 r1.ctrl(angles[k], register[first[k]], register[second[k]])
 
     return apply_word_basis
+
+
+def programmable_split_kernel(schedule, parameter_registers, weights,
+                              adjoint=False):
+    """Word-driven kernel on separately allocated system and parameter views.
+
+    Parameter indices are relative to the span after the physical system,
+    preserving explicit layouts (including gaps). This is the same gate tape
+    as ``programmable_kernel``; it does not allocate or load angle words.
+    """
+    span = schedule.structure.num_system_qubits
+    tape = _gate_tape(schedule, adjoint)
+    rows = []
+    for code, first, second, slot, sign in tape:
+        if code < 4:
+            rows.append((code, first, second, 0, 0.))
+        else:
+            rows.extend((code, second, second,
+                         parameter_registers[slot][bit]-span,
+                         float(sign*weight))
+                        for bit, weight in enumerate(weights))
+    codes = [r[0] for r in rows]
+    targets = [r[1] for r in rows]
+    cx_left = [r[1] if r[0] == 3 else 0 for r in rows]
+    cx_right = [r[2] if r[0] == 3 else 1 for r in rows]
+    word_controls = [r[3] for r in rows]
+    angles = [r[4] for r in rows]
+
+    @cudaq.kernel
+    def apply_split_word_basis(system: cudaq.qview, parameters: cudaq.qview):
+        for k in range(len(codes)):
+            if codes[k] == 0:
+                h(system[targets[k]])
+            elif codes[k] == 1:
+                s(system[targets[k]])
+            elif codes[k] == 2:
+                s.adj(system[targets[k]])
+            elif codes[k] == 3:
+                x.ctrl(system[cx_left[k]], system[cx_right[k]])
+            elif codes[k] == 4:
+                rz.ctrl(angles[k], parameters[word_controls[k]], system[targets[k]])
+            else:
+                r1.ctrl(angles[k], parameters[word_controls[k]], system[targets[k]])
+
+    return apply_split_word_basis
+
+
+def phase_gradient_kernel(schedule, parameter_registers, resource,
+                          adjoint=False, parameter_slots=None):
+    """Separate-view basis change consuming a reusable phase-gradient state.
+
+    Each complete real Givens has two opposite Rz angles on the same word.
+    Replacing these by R1 gives opposite word-dependent scalar phases which
+    cancel, also under coherent control. Number phases already are R1.
+    This identity is for the complete paired tape, not a standalone Rz.
+    """
+    span=schedule.structure.num_system_qubits
+    width=resource.width
+    tape=_gate_tape(schedule,adjoint)
+    compact=parameter_slots is not None
+    slots=tuple(range(len(parameter_registers))) if parameter_slots is None else tuple(parameter_slots)
+    positions={slot:i*width for i,slot in enumerate(slots)}
+    if compact:tape=[row for row in tape if row[0]<4 or row[3] in positions]
+    codes=[row[0] for row in tape]
+    targets=[row[1] if row[0]<4 else row[2] for row in tape]
+    left=[row[1] if row[0]==3 else 0 for row in tape]
+    right=[row[2] if row[0]==3 else 1 for row in tape]
+    offsets=[]
+    for code,first,second,slot,sign in tape:
+        if compact:
+            offsets.append(positions.get(slot,0))
+            continue
+        word=parameter_registers[slot]
+        if tuple(word)!=tuple(range(word[0],word[0]+width)):
+            raise ValueError('phase-gradient backend requires contiguous parameter words')
+        offsets.append(word[0]-span)
+    # Avoid captured vector<bool> (packed bits) at the CUDA-Q boundary.
+    signs=[1 if row[4]>0 else -1 for row in tape]
+    forward=resource.phase_kernel();inverse=resource.phase_kernel(adjoint=True)
+    @cudaq.kernel
+    def apply_gradient_basis(system:cudaq.qview,parameters:cudaq.qview,
+                             gradient:cudaq.qview,scratch:cudaq.qview):
+        for k in range(len(codes)):
+            if codes[k]==0:
+                h(system[targets[k]])
+            elif codes[k]==1:
+                s(system[targets[k]])
+            elif codes[k]==2:
+                s.adj(system[targets[k]])
+            elif codes[k]==3:
+                x.ctrl(system[left[k]],system[right[k]])
+            elif signs[k]>0:
+                forward(parameters[offsets[k]:offsets[k]+width],system[targets[k]],gradient,scratch)
+            else:
+                inverse(parameters[offsets[k]:offsets[k]+width],system[targets[k]],gradient,scratch)
+    return apply_gradient_basis
+
+
+def one_particle_gradient_kernel(schedule,parameter_registers,resource,adjoint=False,parameter_slots=None):
+    """Exact two-mode one-particle restriction on a single logical qubit.
+
+    |0> means occupation of logical mode zero and |1> mode one. This is a
+    validation/simulation sector encoding, not full-Fock-space synthesis.
+    Unconditional word additions retain the otherwise lost scalar phases.
+    """
+    from ..primitives import add_register,subtract_register
+    if schedule.structure.num_modes!=2 or schedule.structure.kind!='partial':
+        raise ValueError('one-particle restriction currently requires a two-mode partial plan')
+    width=resource.width;span=schedule.structure.num_system_qubits
+    operations=list(schedule.operations)
+    if parameter_slots is not None:
+        positions={slot:i*width for i,slot in enumerate(parameter_slots)}
+        operations=[op for op in operations if op.parameter_index in positions]
+    if adjoint:operations=list(reversed(operations))
+    kinds=[0 if op.kind=='givens' else op.first+1 for op in operations]
+    signs=[int(op.scale*(-1 if adjoint else 1)) for op in operations]
+    offsets=[(parameter_registers[op.parameter_index][0]-span if parameter_slots is None
+              else positions[op.parameter_index]) for op in operations]
+    for word in parameter_registers:
+        if tuple(word)!=tuple(range(word[0],word[0]+width)):
+            raise ValueError('contiguous angle words required')
+    positive=resource.phase_kernel();negative=resource.phase_kernel(adjoint=True)
+    @cudaq.kernel
+    def apply_particle_basis(system:cudaq.qview,parameters:cudaq.qview,
+                             gradient:cudaq.qview,scratch:cudaq.qview):
+        for k in range(len(kinds)):
+            if kinds[k]==0:
+                s.adj(system[0]);h(system[0])
+                if signs[k]>0:
+                    positive(parameters[offsets[k]:offsets[k]+width],system[0],gradient,scratch)
+                    positive(parameters[offsets[k]:offsets[k]+width],system[0],gradient,scratch)
+                else:
+                    negative(parameters[offsets[k]:offsets[k]+width],system[0],gradient,scratch)
+                    negative(parameters[offsets[k]:offsets[k]+width],system[0],gradient,scratch)
+                h(system[0]);s(system[0])
+                if signs[k]>0:
+                    subtract_register(parameters[offsets[k]:offsets[k]+width],gradient,scratch.back(1))
+                else:
+                    add_register(parameters[offsets[k]:offsets[k]+width],gradient,scratch.back(1))
+            elif kinds[k]==1:
+                if signs[k]>0:
+                    add_register(parameters[offsets[k]:offsets[k]+width],gradient,scratch.back(1))
+                    negative(parameters[offsets[k]:offsets[k]+width],system[0],gradient,scratch)
+                else:
+                    subtract_register(parameters[offsets[k]:offsets[k]+width],gradient,scratch.back(1))
+                    positive(parameters[offsets[k]:offsets[k]+width],system[0],gradient,scratch)
+            else:
+                if signs[k]>0:
+                    positive(parameters[offsets[k]:offsets[k]+width],system[0],gradient,scratch)
+                else:
+                    negative(parameters[offsets[k]:offsets[k]+width],system[0],gradient,scratch)
+    return apply_particle_basis

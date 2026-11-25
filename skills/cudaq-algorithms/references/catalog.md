@@ -18,6 +18,9 @@ selector remains the entry point for protocol/provider questions.
 | Operation / object | Family selector |
 | --- | --- |
 | Prepare states; [inject a preparation kernel into a consumer](state-preparation/injection-contract.md); construct [excitation pools](state-preparation/operator-pools.md); estimate preparation resources | [State preparation](state-preparation/state-preparation.md) |
+| Compile orbital schedules and encoded words; apply [programmable quantum-word Givens rotations](basis-change/basis-change-programmable.md), mode maps and inverse, or [phase-gradient arithmetic](basis-change/basis-change-phase-gradient.md) | [Basis changes](basis-change/basis-change.md) |
+| Prepare valid THC pairs and alias histories; implement the paper under an explicit [fidelity checklist](thc/thc-fidelity.md) | [THC pairs](thc/thc.md) |
+| Estimate walk eigenphases with [textbook binary QPE](qubitization/qubitization-phase-estimation.md) or the development [shared unary sine-window schedule](qubitization/qubitization-unary-phase-estimation.md) | [Qubitization](qubitization/qubitization.md) |
 | Encode a Pauli-sum operator in a zero-flagged unitary block with [PauliLCU](block-encoding/pauli-lcu.md); use or implement the shared `BlockEncoding` protocol and custom providers | [Block encoding](block-encoding/block-encoding.md) |
 | Apply a [qubitization walk / Walk.kernel](qubitization/qubitization-walk.md) or measure [Chebyshev moments / Walk.moment](qubitization/qubitization-moments.md) | [Qubitization](qubitization/qubitization.md) |
 | Apply [QSP/QSVT phase sequences](qsvt/qsvt-sequence.md) to an encoded spectrum or [recover real-time evolution](qsvt/qsvt-recovery.md) from cosine/sine blocks | [QSVT](qsvt/qsvt.md) |
@@ -26,14 +29,13 @@ selector remains the entry point for protocol/provider questions.
 | Load molecular integrals from [FCIDUMP](chemistry/chemistry-from-fcidump.md), [PySCF](chemistry/chemistry-from-pyscf.md), or [Psi4](chemistry/chemistry-from-psi4.md); build [spin-orbital tensors](chemistry/chemistry-spin-orbital-tensors.md) or [qubit Hamiltonians](chemistry/chemistry-qubit-hamiltonian.md) | [Chemistry bridges](chemistry/chemistry-bridges.md) |
 | [Double-factorize](double-factorization/double-factorization-explicit.md)/[compress](double-factorization/double-factorization-compressed.md) electron-repulsion integrals (ERIs); [reconstruct](double-factorization/double-factorization-reconstruction.md), [compare](double-factorization/double-factorization-error.md), form the [DF-corrected one-body matrix](double-factorization/double-factorization-modified-one-body.md), or estimate [LCU/Burg one-norms](double-factorization/double-factorization-one-norm.md) | [Double factorization](double-factorization/double-factorization.md) |
 | Extract or analyze simulator statevectors with [sim_utils.good_subspace](simulation/simulation-good-subspace.md), [sim_utils.action](simulation/simulation-action.md), [sim_utils.transform](simulation/simulation-transform.md), or [sim_utils.evolve](simulation/simulation-evolve.md) | [Simulation analysis](simulation/simulation-analysis.md) |
-| Build fault-tolerant circuit components from `cudaq_algorithms.primitives` (imported directly; nothing is re-exported at the package root): [QROM table lookup](primitives/primitives-qrom.md) (SELECT or SELECT-SWAP/QROAM), [unary-iteration SELECT walk](primitives/primitives-unary-iteration.md), in-place little-endian [reversible integer arithmetic](primitives/primitives-arithmetic.md) (adders, comparators, QFT family), or [alias-sampling PREPARE](primitives/primitives-alias-sampling.md); exact logical Toffoli counts of strictly unitary kernels | [Circuit primitives](primitives/primitives.md) |
+| Build fault-tolerant circuit components from `cudaq_algorithms.primitives` (imported directly; nothing is re-exported at the package root): [QROM table lookup](primitives/primitives-qrom.md) (SELECT or SELECT-SWAP/QROAM), [unary-iteration SELECT walk](primitives/primitives-unary-iteration.md), in-place little-endian [reversible integer arithmetic](primitives/primitives-arithmetic.md) (adders, comparators, QFT family), or [alias-sampling PREPARE](primitives/primitives-alias-sampling.md); logical Toffoli counts; optional [measured erasure](primitives/primitives-qrom-erasure.md) and [phase-gradient resource](primitives/primitives-phase-gradient.md) | [Circuit primitives](primitives/primitives.md) |
 
 QSVT phase generation and degree selection are not populated capabilities.
-Quantum phase estimation is not a packaged primitive: its building blocks are
-the block encoding's walk-step kernels (qubitization family) and Trotter
-evolution, and `docs/sphinx/examples/python/08_quantum_phase_estimation.py` is
-the self-verifying example (one QPE shell around exact, Trotter, and
-qubitization-walk oracles; walk decoding `E = -alpha*cos(theta)`).
+`PhaseEstimation` is packaged textbook binary walk QPE. The development
+`UnaryPhaseEstimation` has a distinct shared-reflection query contract.
+Explicit paper-fidelity requests use the [paper workflow](paper-implementation.md);
+algorithm availability and actual application use are separate evidence.
 Simulation helpers return or manipulate statevectors; they are not device
 kernels or shot-based QPU protocols. Compose selected contracts with the
 [application guide](application-composition.md) and relevant [conventions](conventions.md).

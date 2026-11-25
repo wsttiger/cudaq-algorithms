@@ -1,6 +1,6 @@
 # Qubitization - family front door
 
-Qubitization exposes two independently selectable contracts:
+Qubitization and walk phase estimation expose these selectable contracts:
 
 ## Selectable operation contracts
 
@@ -8,6 +8,8 @@ Qubitization exposes two independently selectable contracts:
 | --- | --- | --- | --- | --- |
 | evolve / state by a qubitization walk | `Walk.kernel`, adjoint/controlled variants | quantum operation; kernel factory/device kernel | requires `cudaq-algorithms.block-encoding.zero-flagged.v1`; optional state preparation | [walk kernels](qubitization-walk.md) |
 | measure / Chebyshev moment | `Walk.moment`, `Walk.moments` | measurement/readout; kernel + observable + `cudaq.observe` | requires `cudaq-algorithms.block-encoding.zero-flagged.v1`; odd orders also require `select_observable` | [moments](qubitization-moments.md) |
+| estimate / walk eigenphase with a binary ladder | `PhaseEstimation` | host + circuit factory + counts decoder | zero-flagged encoding, optional state prep | [textbook QPE](qubitization-phase-estimation.md) |
+| estimate / walk eigenphase with shared unary reflections | `UnaryPhaseEstimation` | development host + circuit factory | Hermitian SELECT, optional prepared-frame hooks | [sine-window unary control](qubitization-unary-phase-estimation.md) |
 
 Both consume the
 `cudaq-algorithms.block-encoding.zero-flagged.v1` capability. They are not

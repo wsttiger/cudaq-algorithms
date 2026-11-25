@@ -322,6 +322,16 @@ class QROM:
         else:
             self._build_select_swap()
 
+    def measurement_eraser(self, *, block_size=None):
+        """Erase a clean lookup output using X measurement and block fixup.
+
+        Only for output=f(address), not arbitrary XOR targets. The returned
+        object exposes a nonunitary kernel and its own scratch/cost contract.
+        Forward and erasure block sizes are independent.
+        """
+        from ._qrom_erasure import QROMErase
+        return QROMErase(self.data,self.num_address,self.num_output,block_size)
+
     def _build_select(self) -> None:
         entries = self._data
         output_bits = self._output_bits

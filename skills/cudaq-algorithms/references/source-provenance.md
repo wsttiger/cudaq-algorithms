@@ -62,3 +62,20 @@ remain derived evidence until rerun. A validation or evaluation result records
 the exact source revision, dependency versions, targets, and commands actually
 used; it does not inherit the historical anchor unless that was the executed
 source.
+
+## Development extensions for paper mechanisms
+
+Recheck runtime imports against the edited checkout. These extensions do not
+change the baseline version metadata or establish an upstream release.
+
+| Contract | Source under `python/cudaq_algorithms/` | Independent tests under `tests/python/` |
+| --- | --- | --- |
+| Basis plans, encoding, word consumption | `basis_change/_plan.py`, `_encoding.py`, `_factory.py`, `_kernels.py` | `test_fermion_basis_change_plan.py`, `test_fermion_basis_change_qrom.py`, `test_fermion_basis_change_split.py` |
+| Phase-gradient resource and backend | `primitives/_phase_gradient.py`, `basis_change/_kernels.py` | `test_phase_gradient.py`, `test_fermion_basis_change_gradient.py`, `test_one_particle_gradient.py` |
+| Measured known-lookup erasure | `primitives/_qrom_erasure.py`, `_qrom.py` | `test_qrom_erasure.py` |
+| Valid pairs, index, d-bin alias | `thc_prepare.py` | `test_thc_prepare.py` |
+| Textbook and unary phase control | `phase_estimation.py`, `unary_phase_estimation.py` | `test_phase_estimation.py`, `test_unary_phase_estimation.py` |
+
+Routing/coverage checks are not scientific execution or model-evaluation uplift.
+Use the recorded commands, environment and failures in the development evidence
+alongside these source contracts. New records have no claimed model evals.

@@ -45,6 +45,15 @@ input conventions; a default argument must not silently replace them. Numerical
 agreement does not replace an explicitly requested operation or preparation, even
 when the remaining calculation is classical.
 
+For an explicit paper-fidelity implementation, use the
+[paper workflow](references/paper-implementation.md): map each requested
+construction to source, executed independent evidence, precision and resource
+assumptions. For THC / arXiv:2011.03494, start with the
+[THC checklist](references/thc/thc-fidelity.md). These requirements apply to the
+requested paper scope; they do not prescribe THC mechanisms for other tasks.
+Programmable quantum-word angles already exist in `basis_change`; check their
+integration separately from the phase-gradient backend and its arithmetic cost.
+
 Route the in-scope task once. From the directory containing this `SKILL.md`,
 run `python3 scripts/route.py "<original request>"`, or pass the request on
 standard input. Preserve preparation requirements, convention tags and output

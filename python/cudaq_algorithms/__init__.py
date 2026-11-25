@@ -40,6 +40,7 @@ from .common_kernels import state_from
 from .lcu import LCUBlockEncoding
 from .pauli_lcu import PauliLCU, select_observable
 from .phase_estimation import PhaseEstimation
+from .unary_phase_estimation import UnaryPhaseEstimation
 from .qsvt import (ADJOINT, FORWARD, PhaseSequence, QSVT,
                    recover_real_time_evolution)
 from .qubitization import Walk, reflection_observable
